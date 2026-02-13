@@ -144,13 +144,40 @@ adb_open:
 .global adb_close
 .type adb_close, %function
 adb_close:
-    stp x29, x30, [sp, #-32]!
+    stp x29, x30, [sp, #-48]!
     mov x29, sp
-    str x19, [sp, #16]
+    stp x19, x20, [sp, #16]
+    str x21, [sp, #32]
 
     mov x19, x0
     cbz x19, .Lac2_done
 
+    // Flush memtable to B+ tree for persistence
+    ldr x0, [x19, #DB_MEMTABLE_PTR]
+    cbz x0, .Lac2_skip_flush
+    bl memtable_iter_first
+    cbz x0, .Lac2_skip_flush
+
+.Lac2_flush_loop:
+    mov x20, x0                    // current node
+
+    // Skip deleted entries (tombstones)
+    ldrb w1, [x20, #0x141]        // SLN_IS_DELETED
+    cbnz w1, .Lac2_flush_next
+
+    // btree_insert(db, key, val, tx_id=0)
+    mov x0, x19                    // db_ptr
+    mov x1, x20                    // key = node + 0
+    add x2, x20, #0x40            // val = node + SLN_VAL_LEN
+    mov x3, #0                     // tx_id
+    bl btree_insert
+
+.Lac2_flush_next:
+    mov x0, x20
+    bl memtable_iter_next
+    cbnz x0, .Lac2_flush_loop
+
+.Lac2_skip_flush:
     // Close WAL
     mov x0, x19
     bl wal_adapter_close
@@ -159,7 +186,7 @@ adb_close:
     mov x0, x19
     bl lsm_adapter_close
 
-    // Close B+ tree
+    // Close B+ tree (writes metadata to page 0)
     mov x0, x19
     bl btree_adapter_close
 
@@ -181,8 +208,9 @@ adb_close:
 
 .Lac2_done:
     mov x0, #0
-    ldr x19, [sp, #16]
-    ldp x29, x30, [sp], #32
+    ldr x21, [sp, #32]
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #48
     ret
 .size adb_close, .-adb_close
 
@@ -224,8 +252,17 @@ adb_put:
     add x2, sp, #64               // val
     mov x3, #0                     // tx_id = 0 (auto)
     bl router_put
+    mov x20, x0                    // save result
+
+    // Increment puts metric
+    ldr x0, [x19, #DB_METRICS_PTR]
+    cbz x0, .Lap_skip_met
+    mov w1, #0x00                  // MET_PUTS offset
+    bl metrics_inc
+.Lap_skip_met:
 
     add sp, sp, #320
+    mov x0, x20                    // restore result
 
     ldr x23, [sp, #48]
     ldp x21, x22, [sp, #32]
@@ -260,6 +297,13 @@ adb_get:
     mov x1, x20
     mov w2, w21
     bl build_fixed_key
+
+    // Increment gets metric
+    ldr x0, [x19, #DB_METRICS_PTR]
+    cbz x0, .Lag_skip_met
+    mov w1, #0x08                  // MET_GETS offset
+    bl metrics_inc
+.Lag_skip_met:
 
     // Route: search all sources
     mov x0, x19
@@ -329,8 +373,17 @@ adb_delete:
     mov x1, sp
     mov x2, #0                     // tx_id
     bl router_delete
+    mov x20, x0                    // save result
+
+    // Increment deletes metric
+    ldr x0, [x19, #DB_METRICS_PTR]
+    cbz x0, .Ladel_skip_met
+    mov w1, #0x10                  // MET_DELETES offset
+    bl metrics_inc
+.Ladel_skip_met:
 
     add sp, sp, #64
+    mov x0, x20                    // restore result
 
     ldr x21, [sp, #32]
     ldp x19, x20, [sp, #16]
@@ -558,7 +611,49 @@ adb_scan:
     mov w2, w23
     bl build_fixed_key
 
-    // Use B+ tree scan adapter (primary path)
+    // Phase 1: Scan memtable for entries in range
+    ldr x0, [x19, #DB_MEMTABLE_PTR]
+    cbz x0, .Lsc_btree
+    bl memtable_iter_first
+    cbz x0, .Lsc_btree
+
+.Lsc_mt_loop:
+    mov x26, x0                    // current node
+
+    // Skip deleted entries
+    ldrb w0, [x26, #0x141]        // SLN_IS_DELETED
+    cbnz w0, .Lsc_mt_next
+
+    // Compare key with start_key: skip if key < start
+    mov x0, x26                    // node key (offset 0)
+    mov x1, sp                     // start_key
+    bl key_compare
+    cmp x0, #0
+    b.lt .Lsc_mt_next
+
+    // Compare key with end_key: stop if key > end
+    mov x0, x26
+    add x1, sp, #64               // end_key
+    bl key_compare
+    cmp x0, #0
+    b.gt .Lsc_btree
+
+    // Key in range: call callback(key_data, klen, val_data, vlen, ctx)
+    ldrh w1, [x26, #0x000]        // SLN_KEY_LEN
+    add x0, x26, #0x002           // SLN_KEY_DATA
+    ldrh w3, [x26, #0x040]        // SLN_VAL_LEN
+    add x2, x26, #0x042           // SLN_VAL_DATA
+    mov x4, x25                    // user_data
+    blr x24                        // callback
+    cbnz x0, .Lsc_end             // callback returned non-zero = stop
+
+.Lsc_mt_next:
+    mov x0, x26
+    bl memtable_iter_next
+    cbnz x0, .Lsc_mt_loop
+
+.Lsc_btree:
+    // Phase 2: Scan B+ tree
     mov x0, x19                    // db
     mov x1, sp                     // start_key (fixed)
     add x2, sp, #64               // end_key (fixed)
@@ -566,6 +661,7 @@ adb_scan:
     mov x4, x25                    // user_data
     bl btree_adapter_scan
 
+.Lsc_end:
     add sp, sp, #128
 
     ldp x25, x26, [sp, #64]
@@ -1117,6 +1213,10 @@ adb_restore:
 .hidden sec_index_create
 .hidden build_index_filename
 .hidden key_compare
+.hidden memtable_iter_first
+.hidden memtable_iter_next
+.hidden btree_insert
+.hidden metrics_inc
 .hidden prng_seed
 .hidden sys_mkdirat
 .hidden sys_openat

@@ -84,12 +84,23 @@ btree_adapter_init:
     mvn w0, wzr
     str x0, [x19, #DB_BTREE_ROOT]
 
+    // Write initial metadata to page 0
+    ldr x0, [x19, #DB_BTREE_MMAP]
+    movz x1, #0x4241              // "AB"
+    movk x1, #0x5444, lsl #16    // "DT"
+    movk x1, #0x4552, lsl #32    // "RE"
+    movk x1, #0x4545, lsl #48    // "EE"
+    str x1, [x0, #0]             // magic
+    mvn x1, xzr
+    str x1, [x0, #8]             // root = INVALID
+    ldr x1, [x19, #DB_BTREE_NUM_PAGES]
+    str x1, [x0, #16]            // num_pages
+
     b .Lba_wire_vtable
 
 .Lba_existing:
     // Existing file: calculate pages
     lsr x23, x22, #PAGE_SHIFT   // num_pages = file_size / PAGE_SIZE
-    str x23, [x19, #DB_BTREE_NUM_PAGES]
     str x23, [x19, #DB_BTREE_CAPACITY]
 
     // mmap existing file
@@ -102,10 +113,18 @@ btree_adapter_init:
     str x0, [x19, #DB_BTREE_MMAP]
     str x22, [x19, #DB_BTREE_MMAP_LEN]
 
-    // Root page will be loaded from manifest by caller
-    // Default to INVALID_PAGE, caller sets it
-    mvn w0, wzr
-    str x0, [x19, #DB_BTREE_ROOT]
+    // Read metadata from page 0
+    // offset 8 = root_page, offset 16 = num_pages
+    ldr x1, [x0, #8]              // root_page
+    str x1, [x19, #DB_BTREE_ROOT]
+    ldr x1, [x0, #16]             // num_pages
+    cbz x1, .Lba_use_file_pages
+    str x1, [x19, #DB_BTREE_NUM_PAGES]
+    b .Lba_wire_vtable
+
+.Lba_use_file_pages:
+    // Metadata not written yet, use file-based count
+    str x23, [x19, #DB_BTREE_NUM_PAGES]
 
 .Lba_wire_vtable:
     // Allocate storage_port vtable (64 bytes)
@@ -274,6 +293,21 @@ btree_adapter_close:
     str x19, [sp, #16]
 
     mov x19, x0
+
+    // Write metadata to page 0 before closing
+    ldr x0, [x19, #DB_BTREE_MMAP]
+    cbz x0, .Lac_no_mmap
+    ldr x1, [x19, #DB_BTREE_ROOT]
+    str x1, [x0, #8]
+    ldr x1, [x19, #DB_BTREE_NUM_PAGES]
+    str x1, [x0, #16]
+
+    // Sync to disk
+    ldr x0, [x19, #DB_BTREE_FD]
+    cmp x0, #0
+    b.le .Lac_skip_sync
+    bl sys_fdatasync
+.Lac_skip_sync:
 
     // munmap
     ldr x0, [x19, #DB_BTREE_MMAP]

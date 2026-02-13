@@ -63,6 +63,10 @@ test_compress: $(ALIB) tests/test_compress.c
 	$(CC) $(CFLAGS) -o test_compress tests/test_compress.c -L. -l:libassemblydb.a -static
 	./test_compress
 
+test_stress: $(ALIB) tests/test_stress.c
+	$(CC) $(CFLAGS) -o test_stress tests/test_stress.c -L. -l:libassemblydb.a -static
+	./test_stress
+
 test_all: test test_btree test_lsm test_mvcc test_crypto test_compress test_integration
 
 bench: $(ALIB) tests/bench.c
@@ -86,4 +90,4 @@ size: $(LIB) $(ALIB)
 
 clean:
 	find src -name '*.o' -delete
-	rm -f $(LIB) $(ALIB) test_core test_btree test_lsm test_mvcc test_crypto test_compress test_integration bench
+	rm -f $(LIB) $(ALIB) test_core test_btree test_lsm test_mvcc test_crypto test_compress test_integration test_stress bench
