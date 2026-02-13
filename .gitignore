@@ -1,0 +1,28 @@
+# Build artifacts
+*.o
+*.so
+*.a
+
+# Test binaries
+test_core
+test_btree
+test_lsm
+test_mvcc
+test_crypto
+test_compress
+test_integration
+bench
+
+# Test database directories
+/tmp/test_*
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
