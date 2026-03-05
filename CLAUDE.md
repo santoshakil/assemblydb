@@ -18,11 +18,12 @@ make test_mvcc             # Phase 4: MVCC transactions, snapshot isolation
 make test_crypto           # Phase 5a: AES-256-CTR encryption roundtrip
 make test_compress         # Phase 5b: LZ4 compression roundtrip
 make test_integration      # Phase 6: full API end-to-end + secondary indexes + backup
-make test_stress           # Stress testing (20 subtests incl. backup/restore roundtrip)
-make test_adversarial      # Adversarial edge cases (26 subtests incl. randomized reopen model-check)
+make test_stress           # Stress testing (28 subtests incl. backup/restore, crash recovery)
+make test_adversarial      # Adversarial edge cases (70 subtests incl. randomized reopen model-check)
 make test_persist          # Deep persistence/reopen tests (8 subtests)
-make test_edge             # Edge cases (27 subtests incl. tombstone stale-read guard, restore validation)
-make test_hardening        # Production hardening (45 subtests: tx write-set, scan, persistence, real-world)
+make test_edge             # Edge cases (150 subtests incl. CRC integrity, scan correctness)
+make test_hardening        # Production hardening (320 subtests: tx write-set, scan, persistence, real-world)
+make test_production       # Production patterns (30 subtests: compaction, restart cycles, lock exclusion)
 make bench                 # Performance benchmarks
 make size                  # Binary size report
 ```

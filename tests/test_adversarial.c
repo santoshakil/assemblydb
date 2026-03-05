@@ -1794,9 +1794,7 @@ static void test_scan_sorted_after_random_sync(void) {
         adb_put(db, k, strlen(k), "r", 1);
     }
     adb_sync(db);
-    char prev[64] = {0};
-    int sorted = 1, cnt = 0;
-    struct { int *sorted; int *cnt; char (*prev)[64]; } ctx = { &sorted, &cnt, &prev };
+    int cnt = 0;
     // Use a simple scan counter + manual sort check
     adb_scan(db, NULL, 0, NULL, 0, adv_count_cb, &cnt);
     adb_close(db); cleanup("/tmp/adv_ssar");

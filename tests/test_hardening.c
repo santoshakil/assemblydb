@@ -6222,7 +6222,6 @@ static void test_rapid_put_delete_scan_cycle(void) {
     cleanup("/tmp/hdn_rpds");
     adb_t *db;
     if (adb_open("/tmp/hdn_rpds", NULL, &db)) FAIL("open");
-    int bad = 0;
     for (int cycle = 0; cycle < 100; cycle++) {
         for (int i = 0; i < 20; i++) {
             char k[16]; snprintf(k, 16, "c%03dk%03d", cycle, i);
@@ -7008,10 +7007,6 @@ static void test_scan_sorted_random_insert(void) {
         char k[16]; snprintf(k, 16, "r%06u", (unsigned)(s % 999999));
         adb_put(db, k, strlen(k), "v", 1);
     }
-    // Scan and verify sorted
-    char prev[64] = {0};
-    int bad = 0, total = 0;
-    struct { char prev[64]; int bad; int total; } ctx = {{0}, 0, 0};
     // Use a simple inline approach
     adb_sync(db);
     adb_close(db);
@@ -8399,6 +8394,7 @@ static void test_crc_header_integrity(void) {
 // TEST 272: Put 1000 keys, delete even ones, sync, reopen, scan odd ones
 // ============================================================================
 static int h272_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *ctx) {
+    (void)k; (void)kl; (void)v; (void)vl;
     (*(int*)ctx)++; return 0;
 }
 static void test_delete_evens_scan_odds(void) {
@@ -8610,6 +8606,7 @@ static void test_backup_restore_500(void) {
 // TEST 280: scan with bounded start and end yields correct count
 // ============================================================================
 static int h280_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *ctx) {
+    (void)k; (void)kl; (void)v; (void)vl;
     (*(int*)ctx)++; return 0;
 }
 static void test_scan_bounded_count(void) {
@@ -8684,6 +8681,7 @@ static void test_min_key_len(void) {
 // TEST 284: Scan after mix of puts/deletes across 3 syncs
 // ============================================================================
 static int h284_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *ctx) {
+    (void)k; (void)kl; (void)v; (void)vl;
     (*(int*)ctx)++; return 0;
 }
 static void test_scan_after_mixed_syncs(void) {
@@ -8842,6 +8840,7 @@ static void test_idempotent_put(void) {
 // TEST 291: Scan returns no results for non-overlapping range
 // ============================================================================
 static int h291_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *ctx) {
+    (void)k; (void)kl; (void)v; (void)vl;
     (*(int*)ctx)++; return 0;
 }
 static void test_scan_no_overlap(void) {
@@ -8950,6 +8949,7 @@ static void test_backup_preserves_deletes(void) {
 // TEST 296: put 1000 keys, sync, delete 500, sync, reopen: exactly 500 remain
 // ============================================================================
 static int h296_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *ctx) {
+    (void)k; (void)kl; (void)v; (void)vl;
     (*(int*)ctx)++; return 0;
 }
 static void test_delete_half_reopen_scan(void) {

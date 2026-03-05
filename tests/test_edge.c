@@ -1430,8 +1430,6 @@ static void test_key_compare_high_bytes(void) {
     uint8_t k4[] = {0xFF}; adb_put(db, k4, 1, "d", 1);
     // Scan: should be sorted 0x01 < 0x7F < 0x80 < 0xFF
     int cnt = 0;
-    uint8_t prev = 0; int bad = 0;
-    struct { int *cnt; uint8_t *prev; int *bad; } ctx = {&cnt, &prev, &bad};
     adb_scan(db, NULL, 0, NULL, 0, scan_counter, &cnt);
     // Verify using individual gets
     char buf[256]; uint16_t vl;
@@ -2512,6 +2510,7 @@ static void test_many_deletes_persist(void) {
 }
 
 static int edge108_stop_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *ctx) {
+    (void)k; (void)kl; (void)v; (void)vl;
     (*(int*)ctx)++;
     return 1;
 }
@@ -2615,6 +2614,7 @@ static void test_tx_delete_persist_reopen(void) {
 }
 
 static int edge113_cnt_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *ctx) {
+    (void)k; (void)kl; (void)v; (void)vl;
     (*(int*)ctx)++; return 0;
 }
 // 113. Put 500 keys, sync, scan: count matches
@@ -2776,6 +2776,7 @@ static void test_arena_chunk_growth(void) {
 }
 
 static int edge121_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *ctx) {
+    (void)k; (void)kl; (void)v; (void)vl;
     (*(int*)ctx)++; return 0;
 }
 // 121. Scan after heavy overwrites: no duplicates in result
@@ -2941,6 +2942,7 @@ static void test_metrics_batch_counts(void) {
 }
 
 static int edge128_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *ctx) {
+    (void)v; (void)vl;
     char *last = (char*)ctx;
     char cur[64]; int l = kl > 63 ? 63 : kl;
     memcpy(cur, k, l); cur[l] = 0;

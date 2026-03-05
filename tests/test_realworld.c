@@ -29,6 +29,7 @@ static int count_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void
 
 struct kv_verify_ctx { int ok; int count; };
 static int verify_cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *ctx) {
+    (void)vl;
     struct kv_verify_ctx *c = ctx;
     c->count++;
     if (!k || kl == 0 || !v) c->ok = 0;
