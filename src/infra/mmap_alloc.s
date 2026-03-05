@@ -39,9 +39,13 @@ page_alloc:
 .global page_free
 .type page_free, %function
 page_free:
+    cbz x0, 1f                 // Don't munmap NULL
     lsl x1, x1, #PAGE_SHIFT    // num_pages * 4096
     mov x8, #SYS_munmap
     svc #0
+    ret
+1:
+    mov x0, #0
     ret
 .size page_free, .-page_free
 
@@ -105,6 +109,7 @@ alloc_zeroed:
 .type free_mem, %function
 free_mem:
     cbz x0, 1f                 // Don't munmap NULL
+    cbz x1, 1f                 // Don't munmap size=0
     add x1, x1, #PAGE_SIZE - 1
     and x1, x1, #PAGE_MASK
     mov x8, #SYS_munmap

@@ -29,12 +29,12 @@ btree_page_binary_search:
 
     ldrh w21, [x19, #PH_NUM_KEYS]
 
+    // Handle empty page (check before sub to avoid unsigned underflow)
+    cbz w21, .Lbs_not_found_zero
+
     // Binary search: lo=0, hi=num_keys-1
     mov w22, #0             // lo
     sub w23, w21, #1        // hi = num_keys - 1
-
-    // Handle empty page
-    cbz w21, .Lbs_not_found_zero
 
 .Lbs_loop:
     cmp w22, w23
@@ -113,12 +113,22 @@ btree_find_leaf:
     mov x19, x0            // mmap_base
     mov w20, w1             // current page_id
     mov x21, x2            // key_ptr
+    mov w24, #0             // depth counter
 
     // Start at root
     cmn w20, #1
     b.eq .Lfl_error
 
+    // Bounds check root page_id against num_pages (mmap[16])
+    ldr x0, [x19, #16]
+    cmp x20, x0
+    b.hs .Lfl_error
+
 .Lfl_descend:
+    // Depth guard: max 64 levels (prevents infinite loop on corrupt tree)
+    cmp w24, #64
+    b.hs .Lfl_error
+
     // Get page pointer
     mov x0, x19
     mov w1, w20
@@ -128,10 +138,12 @@ btree_find_leaf:
     // Prefetch for next level (speculative)
     prfm pldl1keep, [x22]
 
-    // Check if leaf
+    // Check page type
     ldrh w0, [x22, #PH_PAGE_TYPE]
     cmp w0, #PAGE_TYPE_LEAF
     b.eq .Lfl_at_leaf
+    cmp w0, #PAGE_TYPE_INTERNAL
+    b.ne .Lfl_error                // corrupt: page is neither leaf nor internal
 
     // Internal node: binary search to find child
     mov x0, x22
@@ -152,12 +164,17 @@ btree_find_leaf:
     bl btree_int_get_child
     mov w20, w0             // next page_id
 
-    // Prefetch child page
-    mov x0, x19
-    mov w1, w20
-    bl btree_page_get_ptr
+    // Bounds check child page_id
+    ldr x0, [x19, #16]     // num_pages
+    cmp x20, x0
+    b.hs .Lfl_error
+
+    // Prefetch child page (inline to avoid function call overhead)
+    lsl x0, x20, #PAGE_SHIFT
+    add x0, x19, x0
     prfm pldl1keep, [x0]
 
+    add w24, w24, #1       // increment depth
     b .Lfl_descend
 
 .Lfl_at_leaf:

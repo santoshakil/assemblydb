@@ -11,6 +11,9 @@
 .hidden wal_recover
 .hidden wal_open
 .hidden wal_close
+.hidden alloc_zeroed
+.hidden free_mem
+.hidden not_impl_stub
 
 // ============================================================================
 // wal_adapter_init(db_ptr) -> 0=ok, neg=error
@@ -49,26 +52,33 @@ wal_adapter_init:
     // Fill vtable function pointers
     adrp x0, wal_append
     add x0, x0, :lo12:wal_append
-    str x0, [x1, #0]              // fn_append
+    str x0, [x1, #WP_FN_APPEND]
 
     adrp x0, wal_sync
     add x0, x0, :lo12:wal_sync
-    str x0, [x1, #8]              // fn_sync
+    str x0, [x1, #WP_FN_SYNC]
 
-    // fn_rotate = NULL for now (handled internally)
-    str xzr, [x1, #16]
+    // fn_rotate = not_impl_stub (safe fallback)
+    adrp x0, not_impl_stub
+    add x0, x0, :lo12:not_impl_stub
+    str x0, [x1, #WP_FN_ROTATE]
 
     adrp x0, wal_recover
     add x0, x0, :lo12:wal_recover
-    str x0, [x1, #24]             // fn_recover
+    str x0, [x1, #WP_FN_RECOVER]
 
-    // fn_truncate = NULL
-    str xzr, [x1, #32]
+    // fn_truncate = not_impl_stub (safe fallback)
+    adrp x0, not_impl_stub
+    add x0, x0, :lo12:not_impl_stub
+    str x0, [x1, #WP_FN_TRUNCATE]
 
     mov x0, #0
     b .Lwai_ret
 
 .Lwai_nomem:
+    // Close orphan WAL fd opened by wal_open
+    mov x0, x19
+    bl wal_close
     mov x0, #ADB_ERR_NOMEM
     b .Lwai_ret
 
@@ -91,17 +101,22 @@ wal_adapter_init:
 wal_adapter_close:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
-    str x19, [sp, #16]
+    stp x19, x20, [sp, #16]
 
     mov x19, x0
+    mov w20, #0                    // error accumulator
 
     // Sync WAL
     mov x0, x19
     bl wal_sync
+    cmp x0, #0
+    csel w20, w0, w20, lt          // capture sync error
 
     // Close WAL
     mov x0, x19
     bl wal_close
+    cmp w0, #0
+    csel w20, w0, w20, lt          // capture close error if sync ok
 
     // Free vtable
     ldr x0, [x19, #DB_WAL_PORT]
@@ -111,8 +126,8 @@ wal_adapter_close:
     str xzr, [x19, #DB_WAL_PORT]
 
 .Lwac_done:
-    mov x0, #0
-    ldr x19, [sp, #16]
+    mov w0, w20                    // return sync error (0=ok)
+    ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #32
     ret
 .size wal_adapter_close, .-wal_adapter_close

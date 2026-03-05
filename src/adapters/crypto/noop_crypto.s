@@ -18,7 +18,7 @@ noop_encrypt_page:
     mov x29, sp
 
     mov x0, x2                     // dst
-    mov x1, x1                     // src (already in x1)
+    // x1 = src (already there)
     bl neon_copy_page
 
     mov x0, #ADB_OK

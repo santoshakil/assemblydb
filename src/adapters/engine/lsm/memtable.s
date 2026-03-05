@@ -25,10 +25,9 @@ memtable_create:
 .global memtable_create2
 .type memtable_create2, %function
 memtable_create2:
-    stp x29, x30, [sp, #-48]!
+    stp x29, x30, [sp, #-32]!
     mov x29, sp
     stp x19, x20, [sp, #16]
-    str x21, [sp, #32]
 
     mov x19, x0                    // arena_ptr
 
@@ -45,11 +44,9 @@ memtable_create2:
     mov x1, #SLH_SIZE
     bl neon_memzero
 
-    // Init fields
-    str xzr, [x20, #SLH_ENTRY_COUNT]
+    // Init non-zero fields (rest already zeroed by neon_memzero)
     mov x1, #1
     str x1, [x20, #SLH_MAX_HEIGHT]
-    str xzr, [x20, #SLH_DATA_SIZE]
     str x19, [x20, #SLH_ARENA_PTR]
 
     mov x0, x20
@@ -59,9 +56,8 @@ memtable_create2:
     mov x0, #0
 
 .Lmc2_ret:
-    ldr x21, [sp, #32]
     ldp x19, x20, [sp, #16]
-    ldp x29, x30, [sp], #48
+    ldp x29, x30, [sp], #32
     ret
 .size memtable_create2, .-memtable_create2
 
@@ -132,7 +128,6 @@ memtable_put:
     // Find position: traverse from top level down
     ldr x23, [x19, #SLH_MAX_HEIGHT] // current_height
     sub w24, w23, #1                // level = height - 1
-    add x25, x19, #SLH_FORWARD     // x = head (use head's forward array)
     mov x26, x19                    // x_node = head (the node whose forward we follow)
 
 .Lmp_level_loop:
@@ -140,13 +135,9 @@ memtable_put:
     b.lt .Lmp_level_done
 
 .Lmp_forward_loop:
-    // Get x->forward[level]
-    add x0, x26, #SLH_FORWARD
     // If x_node == head, use SLH_FORWARD, else use SLN_FORWARD
     cmp x26, x19
     b.ne .Lmp_use_sln_fwd
-    ldr x27, [x19, #SLH_FORWARD + 0]  // won't work for variable level
-    // Need level*8 offset
     add x0, x19, #SLH_FORWARD
     ldr x27, [x0, w24, uxtw #3]
     b .Lmp_check_fwd
@@ -161,9 +152,7 @@ memtable_put:
 
     // Compare forward node's key with our key
     mov x0, x20                    // our key
-    add x1, x27, #SLN_KEY_LEN     // forward node key (key starts at SLN_KEY_LEN)
-    // Actually key format: SLN_KEY_LEN (2B) + SLN_KEY_DATA (62B) = same as our 64B key format
-    mov x1, x27                    // node starts with key_len at offset 0
+    mov x1, x27                    // forward node key record (starts at offset 0)
     bl key_compare
     cmp w0, #0
     b.le .Lmp_save_update          // forward >= our key, stop
@@ -211,10 +200,6 @@ memtable_put:
 
 .Lmp_new_node:
     // Generate random height
-    ldr x0, [x19, #SLH_ARENA_PTR]  // use arena ptr as seed source
-    bl prng_next
-    // Use result to determine level
-    mov x0, x0                      // random value in x0
     bl random_level
     mov w23, w0                     // new_height
 
@@ -232,7 +217,6 @@ memtable_put:
     b .Lmp_extend
 
 .Lmp_update_max:
-    str x23, [x19, #SLH_MAX_HEIGHT]
 
 .Lmp_alloc_node:
     mov x0, x19
@@ -240,6 +224,13 @@ memtable_put:
     bl sl_alloc_node
     cbz x0, .Lmp_fail
     mov x25, x0                    // new_node
+
+    // Commit height increase only after successful allocation
+    ldr x24, [x19, #SLH_MAX_HEIGHT]
+    cmp w23, w24
+    b.le .Lmp_skip_height_update
+    str x23, [x19, #SLH_MAX_HEIGHT]
+.Lmp_skip_height_update:
 
     // Copy key into node
     mov x0, x25                    // dst = node (key_len is at offset 0)
@@ -319,99 +310,109 @@ memtable_put:
 .size memtable_put, .-memtable_put
 
 // ============================================================================
-// memtable_get(head, key_ptr, val_buf) -> 0=found, 1=not_found
-// Look up a key in the skip list
-// x0 = head_ptr, x1 = key_ptr, x2 = val_buf (256 bytes)
-// Returns: x0 = 0 if found (val copied), 1 if not found
+// memtable_probe(head, key_ptr, val_buf) -> 0=found, 1=not_found, 2=tombstone
 // ============================================================================
-.global memtable_get
-.type memtable_get, %function
-memtable_get:
+.global memtable_probe
+.type memtable_probe, %function
+memtable_probe:
     stp x29, x30, [sp, #-64]!
     mov x29, sp
     stp x19, x20, [sp, #16]
     stp x21, x22, [sp, #32]
     stp x23, x24, [sp, #48]
 
-    mov x19, x0                    // head
-    mov x20, x1                    // key_ptr
-    mov x21, x2                    // val_buf
+    mov x19, x0
+    mov x20, x1
+    mov x21, x2
 
     ldr x22, [x19, #SLH_MAX_HEIGHT]
-    sub w23, w22, #1               // level = height - 1
-    mov x24, x19                    // current = head
+    sub w23, w22, #1
+    mov x24, x19
 
-.Lmg_level:
+.Lmpr_level:
     cmp w23, #0
-    b.lt .Lmg_check
+    b.lt .Lmpr_check
 
-.Lmg_forward:
-    // Get current->forward[level]
+.Lmpr_forward:
     cmp x24, x19
-    b.ne .Lmg_node_fwd
+    b.ne .Lmpr_node_fwd
     add x0, x19, #SLH_FORWARD
     ldr x22, [x0, w23, uxtw #3]
-    b .Lmg_compare
+    b .Lmpr_compare
 
-.Lmg_node_fwd:
+.Lmpr_node_fwd:
     add x0, x24, #SLN_FORWARD
     ldr x22, [x0, w23, uxtw #3]
 
-.Lmg_compare:
-    cbz x22, .Lmg_down
-
-    mov x0, x20                    // our key
-    mov x1, x22                    // node key
-    bl key_compare
-    cmp w0, #0
-    b.le .Lmg_down                 // node >= our key
-
-    mov x24, x22                   // advance
-    b .Lmg_forward
-
-.Lmg_down:
-    sub w23, w23, #1
-    b .Lmg_level
-
-.Lmg_check:
-    // Check forward[0] of current
-    cmp x24, x19
-    b.ne .Lmg_node_fwd0
-    ldr x22, [x19, #SLH_FORWARD]
-    b .Lmg_final
-
-.Lmg_node_fwd0:
-    ldr x22, [x24, #SLN_FORWARD]
-
-.Lmg_final:
-    cbz x22, .Lmg_not_found
-
-    // Compare
+.Lmpr_compare:
+    cbz x22, .Lmpr_down
     mov x0, x20
     mov x1, x22
     bl key_compare
-    cbnz w0, .Lmg_not_found
+    cmp w0, #0
+    b.le .Lmpr_down
+    mov x24, x22
+    b .Lmpr_forward
 
-    // Check if deleted
+.Lmpr_down:
+    sub w23, w23, #1
+    b .Lmpr_level
+
+.Lmpr_check:
+    cmp x24, x19
+    b.ne .Lmpr_node_fwd0
+    ldr x22, [x19, #SLH_FORWARD]
+    b .Lmpr_final
+
+.Lmpr_node_fwd0:
+    ldr x22, [x24, #SLN_FORWARD]
+
+.Lmpr_final:
+    cbz x22, .Lmpr_not_found
+    mov x0, x20
+    mov x1, x22
+    bl key_compare
+    cbnz w0, .Lmpr_not_found
     ldrb w0, [x22, #SLN_IS_DELETED]
-    cbnz w0, .Lmg_not_found
-
-    // Found: copy val
-    mov x0, x21                    // dst = val_buf
-    add x1, x22, #SLN_VAL_LEN     // src = node val area
+    cbnz w0, .Lmpr_tombstone
+    cbz x21, .Lmpr_found
+    mov x0, x21
+    add x1, x22, #SLN_VAL_LEN
     bl neon_copy_256
 
+.Lmpr_found:
     mov x0, #0
-    b .Lmg_ret
+    b .Lmpr_ret
 
-.Lmg_not_found:
+.Lmpr_tombstone:
+    mov x0, #2
+    b .Lmpr_ret
+
+.Lmpr_not_found:
     mov x0, #ADB_ERR_NOT_FOUND
 
-.Lmg_ret:
+.Lmpr_ret:
     ldp x23, x24, [sp, #48]
     ldp x21, x22, [sp, #32]
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #64
+    ret
+.size memtable_probe, .-memtable_probe
+
+// ============================================================================
+// memtable_get(head, key_ptr, val_buf) -> 0=found, 1=not_found
+// ============================================================================
+.global memtable_get
+.type memtable_get, %function
+memtable_get:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    bl memtable_probe
+    cmp x0, #2
+    b.ne .Lmg_ret
+    mov x0, #ADB_ERR_NOT_FOUND
+.Lmg_ret:
+    ldp x29, x30, [sp], #16
     ret
 .size memtable_get, .-memtable_get
 
@@ -432,10 +433,9 @@ memtable_delete:
 .global memtable_delete2
 .type memtable_delete2, %function
 memtable_delete2:
-    stp x29, x30, [sp, #-48]!
+    stp x29, x30, [sp, #-32]!
     mov x29, sp
     stp x19, x20, [sp, #16]
-    str x21, [sp, #32]
 
     mov x19, x0                    // head
     mov x20, x1                    // key
@@ -455,9 +455,8 @@ memtable_delete2:
 
     add sp, sp, #256
 
-    ldr x21, [sp, #32]
     ldp x19, x20, [sp, #16]
-    ldp x29, x30, [sp], #48
+    ldp x29, x30, [sp], #32
     ret
 .size memtable_delete2, .-memtable_delete2
 

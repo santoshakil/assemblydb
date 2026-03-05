@@ -33,7 +33,7 @@ static int tests_failed = 0;
 static void test_crc32_empty(void) {
     TEST("crc32: empty input");
     uint8_t buf[1] = {0};
-    uint32_t crc = hw_crc32c(buf, 0);
+    (void)hw_crc32c(buf, 0);
     /* CRC32C of empty = 0x00000000 (with finalization XOR) */
     PASS();
 }

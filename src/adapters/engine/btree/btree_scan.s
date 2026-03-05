@@ -54,12 +54,19 @@ btree_scan:
 
 .Lbs_find_first:
     // No start key: find leftmost leaf
+    // Bounds check root_page_id
+    ldr x0, [x19, #16]
+    cmp w20, w0
+    b.hs .Lbs_ok
     mov x0, x19
     mov w1, w20
     bl btree_page_get_ptr
     mov x25, x0
+    mov w27, #0                    // depth counter for find-leftmost
 
 .Lbs_find_leftmost:
+    cmp w27, #64
+    b.hs .Lbs_ok                   // depth guard: prevent infinite loop on corrupt tree
     ldrh w0, [x25, #PH_PAGE_TYPE]
     cmp w0, #PAGE_TYPE_LEAF
     b.eq .Lbs_at_leftmost
@@ -68,8 +75,12 @@ btree_scan:
     mov x0, x25
     mov w1, #0
     bl btree_int_get_child
-    mov x1, x19
-    add x25, x1, x0, lsl #PAGE_SHIFT
+    // Bounds check child page ID
+    ldr x1, [x19, #16]
+    cmp x0, x1
+    b.hs .Lbs_ok
+    add x25, x19, x0, lsl #PAGE_SHIFT
+    add w27, w27, #1
     b .Lbs_find_leftmost
 
 .Lbs_at_leftmost:
@@ -83,7 +94,7 @@ btree_scan:
     // Check if we're past the end of this leaf
     ldrh w27, [x25, #PH_NUM_KEYS]
     cmp w26, w27
-    b.ge .Lbs_next_leaf
+    b.hs .Lbs_next_leaf
 
     // Get key at current position
     mov x0, x25
@@ -131,9 +142,18 @@ btree_scan:
     cmn w0, #1
     b.eq .Lbs_ok
 
+    // Bounds check: page_id must be < num_pages (stored at mmap[16])
+    ldr x1, [x19, #16]
+    cmp x0, x1
+    b.hs .Lbs_ok
+
     // Get next leaf pointer
     lsl x0, x0, #PAGE_SHIFT
     add x25, x19, x0
+    // Validate target is actually a leaf page
+    ldrh w1, [x25, #PH_PAGE_TYPE]
+    cmp w1, #PAGE_TYPE_LEAF
+    b.ne .Lbs_ok                   // corrupt chain, stop scan
     mov w26, #0
     b .Lbs_scan_loop
 
@@ -185,18 +205,31 @@ btree_count:
     cmn w1, #1
     b.eq .Lbc_done
 
+    // Bounds check root_page_id
+    ldr x0, [x19, #16]
+    cmp w1, w0
+    b.hs .Lbc_done
+
     // Find leftmost leaf
     lsl x1, x1, #PAGE_SHIFT
     add x21, x19, x1
+    mov w9, #0                     // depth counter (caller-saved, no bl in loop)
 
 .Lbc_find_left:
+    cmp w9, #64
+    b.hs .Lbc_done                 // depth guard
     ldrh w0, [x21, #PH_PAGE_TYPE]
     cmp w0, #PAGE_TYPE_LEAF
     b.eq .Lbc_count_loop
 
     add x0, x21, #BTREE_INT_CHILDREN_OFF
     ldr x0, [x0]            // child[0]
+    // Bounds check
+    ldr x1, [x19, #16]
+    cmp x0, x1
+    b.hs .Lbc_done
     add x21, x19, x0, lsl #PAGE_SHIFT
+    add w9, w9, #1
     b .Lbc_find_left
 
 .Lbc_count_loop:
@@ -207,8 +240,17 @@ btree_count:
     cmn w0, #1
     b.eq .Lbc_done
 
+    // Bounds check
+    ldr x1, [x19, #16]
+    cmp x0, x1
+    b.hs .Lbc_done
+
     lsl x0, x0, #PAGE_SHIFT
     add x21, x19, x0
+    // Validate target is a leaf page
+    ldrh w0, [x21, #PH_PAGE_TYPE]
+    cmp w0, #PAGE_TYPE_LEAF
+    b.ne .Lbc_done
     b .Lbc_count_loop
 
 .Lbc_done:

@@ -66,20 +66,16 @@ crypto_ctx_destroy:
 .global aes_page_encrypt
 .type aes_page_encrypt, %function
 aes_page_encrypt:
-    stp x29, x30, [sp, #-32]!
+    stp x29, x30, [sp, #-16]!
     mov x29, sp
-    str x19, [sp, #16]
 
     // x0 = ctx, x1 = plaintext, x2 = ciphertext, x3 = page_id
-    ldr x4, [x0, #CCTX_KEY_SET]
-    cbz x4, .Lape_err
+    ldr x5, [x0, #CCTX_KEY_SET]
+    cbz x5, .Lape_err
 
-    mov x19, x3                    // save page_id
-    add x0, x0, #CCTX_EXPANDED_KEY // expanded key ptr
-    // x1 = input (already set)
-    // x2 = output (already set)
-    mov x3, #PAGE_SIZE             // size
-    mov x4, x19                    // page_id as nonce
+    mov x4, x3                    // page_id as nonce (before x3 clobbered)
+    add x0, x0, #CCTX_EXPANDED_KEY
+    mov x3, #PAGE_SIZE
 
     bl aes_ctr_process
 
@@ -87,11 +83,10 @@ aes_page_encrypt:
     b .Lape_ret
 
 .Lape_err:
-    mov x0, #ADB_ERR_DECRYPT
+    mov x0, #ADB_ERR_INVALID
 
 .Lape_ret:
-    ldr x19, [sp, #16]
-    ldp x29, x30, [sp], #32
+    ldp x29, x30, [sp], #16
     ret
 .size aes_page_encrypt, .-aes_page_encrypt
 
@@ -102,17 +97,15 @@ aes_page_encrypt:
 .global aes_page_decrypt
 .type aes_page_decrypt, %function
 aes_page_decrypt:
-    stp x29, x30, [sp, #-32]!
+    stp x29, x30, [sp, #-16]!
     mov x29, sp
-    str x19, [sp, #16]
 
-    ldr x4, [x0, #CCTX_KEY_SET]
-    cbz x4, .Lapd_err
+    ldr x5, [x0, #CCTX_KEY_SET]
+    cbz x5, .Lapd_err
 
-    mov x19, x3
+    mov x4, x3                    // page_id as nonce
     add x0, x0, #CCTX_EXPANDED_KEY
     mov x3, #PAGE_SIZE
-    mov x4, x19
 
     bl aes_ctr_process
 
@@ -123,8 +116,7 @@ aes_page_decrypt:
     mov x0, #ADB_ERR_DECRYPT
 
 .Lapd_ret:
-    ldr x19, [sp, #16]
-    ldp x29, x30, [sp], #32
+    ldp x29, x30, [sp], #16
     ret
 .size aes_page_decrypt, .-aes_page_decrypt
 

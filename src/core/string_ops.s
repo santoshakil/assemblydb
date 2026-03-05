@@ -73,14 +73,15 @@ asm_strcat:
 .global u64_to_dec
 .type u64_to_dec, %function
 u64_to_dec:
+    sub sp, sp, #32             // Allocate scratch (max 20 digits + align)
     mov x2, x1                 // Save buf start
     mov x3, x1                 // Write pointer
 
     // Special case: 0
     cbz x0, .Lutd_zero
 
-    // Build digits in reverse on stack
-    mov x4, sp
+    // Build digits in reverse on allocated stack space
+    add x4, sp, #32            // Start from top of scratch buffer
     mov x5, #0                 // digit count
     mov x6, #10
 
@@ -106,6 +107,7 @@ u64_to_dec:
     b.ne .Lutd_copy
 .Lutd_null:
     strb wzr, [x3]             // Null terminate
+    add sp, sp, #32
     ret
 
 .Lutd_zero:
@@ -113,6 +115,7 @@ u64_to_dec:
     strb w4, [x3], #1
     strb wzr, [x3]
     mov x0, #1
+    add sp, sp, #32
     ret
 .size u64_to_dec, .-u64_to_dec
 
@@ -152,6 +155,8 @@ u64_to_padded_dec:
 
 .Lpd_div:
     cbz x0, .Lpd_done
+    cmp x3, x1
+    b.lo .Lpd_overflow             // Buffer full, digits remain: overflow
     udiv x5, x0, x4
     msub x6, x5, x4, x0
     add x6, x6, #'0'
@@ -159,6 +164,12 @@ u64_to_padded_dec:
     sub x3, x3, #1
     mov x0, x5
     b .Lpd_div
+
+.Lpd_overflow:
+    movn x0, #0                    // -1: value exceeds width capacity
+    ldr x19, [sp, #16]
+    ldp x29, x30, [sp], #32
+    ret
 
 .Lpd_done:
     mov x0, x19
@@ -212,7 +223,7 @@ build_path:
 build_wal_name:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
-    stp x19, x20, [sp, #16]
+    str x19, [sp, #16]
 
     mov x19, x0                // buf
 
@@ -245,7 +256,7 @@ build_wal_name:
     strb wzr, [x0]
 
     mov x0, #14                // "wal/000001.wal" = 14 chars
-    ldp x19, x20, [sp, #16]
+    ldr x19, [sp, #16]
     ldp x29, x30, [sp], #32
     ret
 .size build_wal_name, .-build_wal_name
@@ -261,7 +272,7 @@ build_wal_name:
 build_sst_name:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
-    stp x19, x20, [sp, #16]
+    str x19, [sp, #16]
 
     mov x19, x0
 
@@ -302,7 +313,7 @@ build_sst_name:
     strb wzr, [x0]
 
     mov x0, #17                // "sst/L0-000001.sst" = 17 chars
-    ldp x19, x20, [sp, #16]
+    ldr x19, [sp, #16]
     ldp x29, x30, [sp], #32
     ret
 .size build_sst_name, .-build_sst_name

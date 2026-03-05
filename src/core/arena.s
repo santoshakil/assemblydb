@@ -74,6 +74,9 @@ arena_alloc:
     stp x19, x20, [sp, #16]
     str x21, [sp, #32]
 
+    cbz x0, .Laa_fail          // NULL arena guard
+    cbz x1, .Laa_fail          // zero-size guard
+
     mov x19, x0                // arena
     // Align size up to 8 bytes
     add x20, x1, #7
@@ -84,7 +87,7 @@ arena_alloc:
     ldr x1, [x19, #ARENA_CHUNK_SIZE]       // chunk_size
     add x2, x0, x20                         // new_offset = current + size
     cmp x2, x1
-    b.gt .Laa_new_chunk                      // need new chunk
+    b.hi .Laa_new_chunk                      // need new chunk (unsigned)
 
     // Allocate from current chunk
     ldr x3, [x19, #ARENA_BASE_PTR]
@@ -107,7 +110,7 @@ arena_alloc:
     add x0, x20, #ACHUNK_HEADER_SIZE
     mov x1, #ARENA_CHUNK_DEFAULT
     cmp x0, x1
-    csel x21, x0, x1, gt       // max(needed, default)
+    csel x21, x0, x1, hi       // max(needed, default) unsigned
 
     // Align chunk size to page
     add x21, x21, #PAGE_SIZE - 1
@@ -163,9 +166,10 @@ arena_alloc:
 .global arena_destroy
 .type arena_destroy, %function
 arena_destroy:
-    stp x29, x30, [sp, #-32]!
+    stp x29, x30, [sp, #-48]!
     mov x29, sp
     stp x19, x20, [sp, #16]
+    str x21, [sp, #32]
 
     cbz x0, .Lad_done
     mov x19, x0                // arena_ptr
@@ -176,17 +180,15 @@ arena_destroy:
 .Lad_loop:
     cbz x20, .Lad_free_state
 
-    // Save next pointer before freeing
-    ldr x0, [x20, #ACHUNK_NEXT]
-    str x0, [sp, #-16]!        // push next
+    // Save next pointer in callee-saved x21
+    ldr x21, [x20, #ACHUNK_NEXT]
 
     // Free this chunk
     mov x0, x20
     ldr x1, [x20, #ACHUNK_SIZE]
     bl free_mem
 
-    // Pop next
-    ldr x20, [sp], #16
+    mov x20, x21
     b .Lad_loop
 
 .Lad_free_state:
@@ -196,8 +198,9 @@ arena_destroy:
     bl free_mem
 
 .Lad_done:
+    ldr x21, [sp, #32]
     ldp x19, x20, [sp, #16]
-    ldp x29, x30, [sp], #32
+    ldp x29, x30, [sp], #48
     ret
 .size arena_destroy, .-arena_destroy
 
@@ -209,9 +212,12 @@ arena_destroy:
 .global arena_reset
 .type arena_reset, %function
 arena_reset:
-    stp x29, x30, [sp, #-32]!
+    stp x29, x30, [sp, #-48]!
     mov x29, sp
     stp x19, x20, [sp, #16]
+    str x21, [sp, #32]
+
+    cbz x0, .Lar_done          // NULL arena guard
 
     mov x19, x0
 
@@ -225,11 +231,11 @@ arena_reset:
     cbz x0, .Lar_reset_state    // x20 is the only/last chunk
 
     // x20 has a next -> free x20, continue with next
-    str x0, [sp, #-16]!
+    ldr x21, [x20, #ACHUNK_NEXT]
     mov x0, x20
     ldr x1, [x20, #ACHUNK_SIZE]
     bl free_mem
-    ldr x20, [sp], #16
+    mov x20, x21
     b .Lar_find_tail
 
 .Lar_reset_state:
@@ -243,7 +249,9 @@ arena_reset:
     str xzr, [x19, #ARENA_TOTAL_ALLOC]
     str xzr, [x20, #ACHUNK_NEXT]
 
+.Lar_done:
+    ldr x21, [sp, #32]
     ldp x19, x20, [sp, #16]
-    ldp x29, x30, [sp], #32
+    ldp x29, x30, [sp], #48
     ret
 .size arena_reset, .-arena_reset

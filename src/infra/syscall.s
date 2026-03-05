@@ -83,6 +83,17 @@ sys_lseek:
 .size sys_lseek, .-sys_lseek
 
 // ----------------------------------------------------------------------------
+// sys_fstat(fd, statbuf) -> 0 or -errno
+// ----------------------------------------------------------------------------
+.global sys_fstat
+.type sys_fstat, %function
+sys_fstat:
+    mov x8, #SYS_fstat
+    svc #0
+    ret
+.size sys_fstat, .-sys_fstat
+
+// ----------------------------------------------------------------------------
 // sys_mmap(addr, length, prot, flags, fd, offset) -> ptr or -errno
 // x0=addr, x1=length, x2=prot, x3=flags, x4=fd, x5=offset
 // ----------------------------------------------------------------------------

@@ -67,6 +67,46 @@ test_stress: $(ALIB) tests/test_stress.c
 	$(CC) $(CFLAGS) -o test_stress tests/test_stress.c -L. -l:libassemblydb.a -static
 	./test_stress
 
+test_adversarial: $(ALIB) tests/test_adversarial.c
+	$(CC) $(CFLAGS) -o test_adversarial tests/test_adversarial.c -L. -l:libassemblydb.a -static
+	./test_adversarial
+
+test_persist: $(ALIB) tests/diag_persist.c
+	$(CC) $(CFLAGS) -o test_persist tests/diag_persist.c -L. -l:libassemblydb.a -static
+	./test_persist
+
+test_edge: $(ALIB) tests/test_edge.c
+	$(CC) $(CFLAGS) -o test_edge tests/test_edge.c -L. -l:libassemblydb.a -static
+	./test_edge
+
+test_hardening: $(ALIB) tests/test_hardening.c
+	$(CC) $(CFLAGS) -o test_hardening tests/test_hardening.c -L. -l:libassemblydb.a -static
+	./test_hardening
+
+test_integrity: $(ALIB) tests/test_integrity.c
+	$(CC) $(CFLAGS) -o test_integrity tests/test_integrity.c -L. -l:libassemblydb.a -static
+	./test_integrity
+
+test_realworld: $(ALIB) tests/test_realworld.c
+	$(CC) $(CFLAGS) -o test_realworld tests/test_realworld.c -L. -l:libassemblydb.a -static
+	./test_realworld
+
+test_bulletproof: $(ALIB) tests/test_bulletproof.c
+	$(CC) $(CFLAGS) -o test_bulletproof tests/test_bulletproof.c -L. -l:libassemblydb.a -static
+	./test_bulletproof
+
+test_torture: $(ALIB) tests/test_torture.c
+	$(CC) $(CFLAGS) -o test_torture tests/test_torture.c -L. -l:libassemblydb.a -static
+	./test_torture
+
+test_endurance: $(ALIB) tests/test_endurance.c
+	$(CC) $(CFLAGS) -o test_endurance tests/test_endurance.c -L. -l:libassemblydb.a -static
+	./test_endurance
+
+test_production: $(ALIB) tests/test_production.c
+	$(CC) $(CFLAGS) -o test_production tests/test_production.c -L. -l:libassemblydb.a -static
+	./test_production
+
 test_all: test test_btree test_lsm test_mvcc test_crypto test_compress test_integration
 
 bench: $(ALIB) tests/bench.c
@@ -90,4 +130,4 @@ size: $(LIB) $(ALIB)
 
 clean:
 	find src -name '*.o' -delete
-	rm -f $(LIB) $(ALIB) test_core test_btree test_lsm test_mvcc test_crypto test_compress test_integration test_stress bench
+	rm -f $(LIB) $(ALIB) test_core test_btree test_lsm test_mvcc test_crypto test_compress test_integration test_stress test_adversarial test_persist test_edge test_hardening test_integrity test_realworld test_bulletproof test_torture test_endurance test_production bench

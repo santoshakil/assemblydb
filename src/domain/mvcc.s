@@ -18,17 +18,11 @@
 // 0x168  prev_version (8B) - newer
 // 0x170  _reserved (16B)
 
-.equ MVE_TX_ID,         0x000
-.equ MVE_END_TX_ID,     0x008
-.equ MVE_TIMESTAMP,     0x010
-.equ MVE_KEY,           0x018
-.equ MVE_VALUE,         0x058
-.equ MVE_IS_DELETED,    0x158
-.equ MVE_NEXT_VER,      0x160
-.equ MVE_PREV_VER,      0x168
-.equ MVE_SIZE,          0x180
+// Local aliases for const.s names (same offsets, shorter names)
+.equ MVE_NEXT_VER,      MVE_NEXT_VERSION
+.equ MVE_PREV_VER,      MVE_PREV_VERSION
 
-.equ TX_ID_MAX,         0x7FFFFFFFFFFFFFFF
+// TX_ID_MAX defined in const.s (0xFFFFFFFFFFFFFFFF)
 
 // ============================================================================
 // mvcc_is_visible(version_ptr, tx_id) -> 0=visible, 1=not_visible
@@ -123,3 +117,8 @@ mvcc_create_version:
     ldp x29, x30, [sp], #64
     ret
 .size mvcc_create_version, .-mvcc_create_version
+
+.hidden arena_alloc
+.hidden neon_memzero
+.hidden neon_copy_64
+.hidden neon_copy_256

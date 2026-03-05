@@ -47,6 +47,10 @@ sec_index_create:
     mov x20, x1                    // name
     mov x21, x2                    // name_len
 
+    // Bounds check: "idx_" + name + ".dat\0" must fit in 256B buffer
+    cmp x21, #247
+    b.hi .Lsic_fail
+
     // Allocate index descriptor
     mov x0, #IDX_SIZE
     bl alloc_zeroed
@@ -160,7 +164,7 @@ sec_index_destroy:
 .Lsid_close:
     ldr w0, [x19, #IDX_FD]
     cmp w0, #0
-    b.le .Lsid_free
+    b.lt .Lsid_free
     bl sys_close
 
 .Lsid_free:
@@ -188,24 +192,22 @@ sec_index_insert:
     stp x19, x20, [sp, #16]
     stp x21, x22, [sp, #32]
 
+    // NULL guard
+    cbz x0, .Lsii_invalid
+    cbz x1, .Lsii_invalid
+    cbz x2, .Lsii_invalid
+
     mov x19, x0                    // index
     mov x20, x1                    // sec key
     mov x21, x2                    // pri key (as value)
 
-    // We reuse btree_insert with the index's B+ tree pages
-    // btree_insert needs: mmap_base, root_page, num_pages, key, val
-    // and updates root/num_pages
-
-    // For now, do a simple linear scan insertion (simplified index)
-    // A full implementation would use btree_insert with the index's mmap
-
-    // Simplified: just store the mapping in the leaf pages sequentially
+    // Compute root page ptr once, cache in callee-saved x22
     ldr x0, [x19, #IDX_MMAP]
     ldr x1, [x19, #IDX_ROOT]
     lsl x1, x1, #PAGE_SHIFT
-    add x0, x0, x1                 // root page ptr
+    add x22, x0, x1               // root page ptr (cached)
 
-    ldrh w2, [x0, #PH_NUM_KEYS]
+    ldrh w2, [x22, #PH_NUM_KEYS]
     cmp w2, #BTREE_LEAF_MAX_KEYS
     b.ge .Lsii_full
 
@@ -214,7 +216,7 @@ sec_index_insert:
     mov x3, #64
     mul x3, x3, x2                 // offset for key slot
     add x3, x3, #BTREE_KEYS_OFFSET
-    add x4, x0, x3                 // key slot ptr
+    add x4, x22, x3               // key slot ptr
 
     // Copy secondary key
     mov x0, x4
@@ -223,30 +225,26 @@ sec_index_insert:
 
     // Copy primary key as value
     // val[i] = base + BTREE_LEAF_VALS_OFF + i*256
-    ldr x0, [x19, #IDX_MMAP]
-    ldr x1, [x19, #IDX_ROOT]
-    lsl x1, x1, #PAGE_SHIFT
-    add x0, x0, x1
-    ldrh w2, [x0, #PH_NUM_KEYS]
+    ldrh w2, [x22, #PH_NUM_KEYS]
     mov x3, #256
     mul x3, x3, x2
     add x3, x3, #BTREE_LEAF_VALS_OFF
-    add x4, x0, x3
+    add x4, x22, x3
 
     mov x0, x4
     mov x1, x21
     bl neon_copy_256
 
     // Increment num_keys
-    ldr x0, [x19, #IDX_MMAP]
-    ldr x1, [x19, #IDX_ROOT]
-    lsl x1, x1, #PAGE_SHIFT
-    add x0, x0, x1
-    ldrh w2, [x0, #PH_NUM_KEYS]
+    ldrh w2, [x22, #PH_NUM_KEYS]
     add w2, w2, #1
-    strh w2, [x0, #PH_NUM_KEYS]
+    strh w2, [x22, #PH_NUM_KEYS]
 
     mov x0, #ADB_OK
+    b .Lsii_ret
+
+.Lsii_invalid:
+    mov x0, #ADB_ERR_INVALID
     b .Lsii_ret
 
 .Lsii_full:
@@ -273,6 +271,11 @@ sec_index_scan:
     stp x21, x22, [sp, #32]
     stp x23, x24, [sp, #48]
     str x25, [sp, #64]
+
+    // NULL guards
+    cbz x0, .Lsis_err
+    cbz x1, .Lsis_err
+    cbz x2, .Lsis_err
 
     mov x19, x0                    // index
     mov x20, x1                    // search key
@@ -326,8 +329,14 @@ sec_index_scan:
     add w25, w25, #1
     b .Lsis_loop
 
+.Lsis_err:
+    mov x0, #ADB_ERR_INVALID
+    b .Lsis_ret
+
 .Lsis_done:
     mov x0, #ADB_OK
+
+.Lsis_ret:
     ldr x25, [sp, #64]
     ldp x23, x24, [sp, #48]
     ldp x21, x22, [sp, #32]
@@ -397,29 +406,13 @@ ftruncate_file:
 // ============================================================================
 mmap_file:
     // w0 = fd, x1 = length, x2 = prot, x3 = flags
+    // mmap(addr=0, length, prot, flags, fd, offset=0)
     mov w4, w0                     // fd
-    mov x5, x1                     // length
     mov x0, #0                     // addr = NULL
-    mov x1, x5                     // length
-    // x2 = prot (already set)
-    // x3 = flags (already set)
-    mov w4, w4                     // fd (reuse saved)
-
-    // Actually need to redo registers for mmap syscall
-    // mmap(addr, length, prot, flags, fd, offset)
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
-
-    mov x8, #SYS_mmap
-    mov x0, #0                     // addr
-    // x1 = length (already)
-    // x2 = prot (already)
-    // x3 = flags (already)
-    // x4 = fd
+    // x1 = length, x2 = prot, x3 = flags already set
     mov x5, #0                     // offset
+    mov x8, #SYS_mmap
     svc #0
-
-    ldp x29, x30, [sp], #16
     ret
 .size mmap_file, .-mmap_file
 

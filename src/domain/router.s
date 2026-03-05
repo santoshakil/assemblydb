@@ -30,25 +30,25 @@ router_put:
 .global router_get
 .type router_get, %function
 router_get:
-    stp x29, x30, [sp, #-80]!
+    stp x29, x30, [sp, #-64]!
     mov x29, sp
     stp x19, x20, [sp, #16]
-    stp x21, x22, [sp, #32]
-    stp x23, x24, [sp, #48]
-    str x25, [sp, #64]
+    stp x21, x23, [sp, #32]
+    stp x24, x25, [sp, #48]
 
     mov x19, x0                    // db_ptr
     mov x20, x1                    // key_ptr
     mov x21, x2                    // val_buf
-    mov x22, x3                    // tx_id
 
     // 1. Check active memtable
     ldr x0, [x19, #DB_MEMTABLE_PTR]
     cbz x0, .Lrg_check_imm
     mov x1, x20
     mov x2, x21
-    bl memtable_get
+    bl memtable_probe
     cbz x0, .Lrg_found
+    cmp x0, #2
+    b.eq .Lrg_not_found
 
 .Lrg_check_imm:
     // 2. Check immutable memtable
@@ -56,27 +56,30 @@ router_get:
     cbz x0, .Lrg_check_l0
     mov x1, x20
     mov x2, x21
-    bl memtable_get
+    bl memtable_probe
     cbz x0, .Lrg_found
+    cmp x0, #2
+    b.eq .Lrg_not_found
 
 .Lrg_check_l0:
     // 3. Check L0 SSTables (newest first)
     ldr w23, [x19, #DB_SST_COUNT_L0]
     cbz w23, .Lrg_check_l1
     sub w24, w23, #1
+    add x25, x19, #DB_SST_LIST_L0
 
 .Lrg_l0_loop:
-    cmp w24, #0
-    b.lt .Lrg_check_l1
-    add x25, x19, #DB_SST_LIST_L0
     ldr x0, [x25, w24, uxtw #3]
     cbz x0, .Lrg_l0_next
     mov x1, x20
     mov x2, x21
     bl sstable_get
     cbz x0, .Lrg_found
+    cmp x0, #ADB_ERR_NOT_FOUND
+    b.ne .Lrg_ret
 
 .Lrg_l0_next:
+    cbz w24, .Lrg_check_l1
     sub w24, w24, #1
     b .Lrg_l0_loop
 
@@ -85,17 +88,19 @@ router_get:
     ldr w23, [x19, #DB_SST_COUNT_L1]
     cbz w23, .Lrg_check_btree
     mov w24, #0
+    add x25, x19, #DB_SST_LIST_L1
 
 .Lrg_l1_loop:
     cmp w24, w23
-    b.ge .Lrg_check_btree
-    add x25, x19, #DB_SST_LIST_L1
+    b.hs .Lrg_check_btree         // unsigned compare
     ldr x0, [x25, w24, uxtw #3]
     cbz x0, .Lrg_l1_next
     mov x1, x20
     mov x2, x21
     bl sstable_get
     cbz x0, .Lrg_found
+    cmp x0, #ADB_ERR_NOT_FOUND
+    b.ne .Lrg_ret
 
 .Lrg_l1_next:
     add w24, w24, #1
@@ -111,7 +116,7 @@ router_get:
     mov x2, x20                    // key
     mov x3, x21                    // val_buf
     bl btree_get
-    cbz x0, .Lrg_found
+    b .Lrg_ret
 
 .Lrg_not_found:
     mov x0, #ADB_ERR_NOT_FOUND
@@ -121,11 +126,10 @@ router_get:
     mov x0, #0
 
 .Lrg_ret:
-    ldr x25, [sp, #64]
-    ldp x23, x24, [sp, #48]
-    ldp x21, x22, [sp, #32]
+    ldp x24, x25, [sp, #48]
+    ldp x21, x23, [sp, #32]
     ldp x19, x20, [sp, #16]
-    ldp x29, x30, [sp], #80
+    ldp x29, x30, [sp], #64
     ret
 .size router_get, .-router_get
 
@@ -142,6 +146,6 @@ router_delete:
 
 .hidden lsm_put
 .hidden lsm_delete
-.hidden memtable_get
+.hidden memtable_probe
 .hidden btree_get
 .hidden sstable_get

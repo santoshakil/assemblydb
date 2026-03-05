@@ -59,7 +59,6 @@ bloom_create:
     ret
 
 .Lbc_fail:
-    mov x0, #0
     ldr x19, [sp, #16]
     ldp x29, x30, [sp], #32
     ret
@@ -122,6 +121,7 @@ bloom_add:
 
     // Load bloom filter parameters
     ldr w23, [x19, #BLM_NUM_BITS]   // num_bits
+    cbz w23, .Lba_done              // guard: no bits = nothing to set
     add x24, x19, #BLM_BIT_ARRAY    // bit_array base
 
     // Set BLOOM_NUM_HASHES bits using enhanced double hashing
@@ -130,7 +130,7 @@ bloom_add:
     mov w4, #0                  // i = 0
 .Lba_loop:
     cmp w4, #BLOOM_NUM_HASHES
-    b.ge .Lba_done
+    b.hs .Lba_done
 
     // bit_pos = h % num_bits
     udiv w5, w0, w23
@@ -199,13 +199,14 @@ bloom_check:
     orr w22, w0, #1             // h2 | 1 = always odd
 
     ldr w23, [x19, #BLM_NUM_BITS]
+    cbz w23, .Lbc_absent            // guard: no bits = definitely absent
     add x24, x19, #BLM_BIT_ARRAY
 
     mov w0, w21                 // h = h1
     mov w4, #0                  // i = 0
 .Lbc_check_loop:
     cmp w4, #BLOOM_NUM_HASHES
-    b.ge .Lbc_present
+    b.hs .Lbc_present
 
     // bit_pos = h % num_bits
     udiv w5, w0, w23

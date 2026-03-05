@@ -14,17 +14,17 @@
 noop_compress:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
-    stp x19, x20, [sp, #16]
+    str x19, [sp, #16]
 
     mov x19, x2                    // save in_len
 
-    // Check capacity
+    // Check capacity (unsigned)
     cmp x4, x2
-    b.lt .Lnc_err
+    b.lo .Lnc_err
 
     // Copy input to output
     mov x0, x3                     // dst
-    mov x1, x1                     // src
+    // x1 = src (already there)
     mov x2, x19                    // len
     bl neon_memcpy
 
@@ -36,7 +36,7 @@ noop_compress:
     neg x0, x0
 
 .Lnc_ret:
-    ldp x19, x20, [sp, #16]
+    ldr x19, [sp, #16]
     ldp x29, x30, [sp], #32
     ret
 .size noop_compress, .-noop_compress
@@ -49,12 +49,12 @@ noop_compress:
 noop_decompress:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
-    stp x19, x20, [sp, #16]
+    str x19, [sp, #16]
 
     mov x19, x2
 
     cmp x4, x2
-    b.lt .Lnd_err
+    b.lo .Lnd_err
 
     mov x0, x3
     // x1 = src
@@ -69,7 +69,7 @@ noop_decompress:
     neg x0, x0
 
 .Lnd_ret:
-    ldp x19, x20, [sp, #16]
+    ldr x19, [sp, #16]
     ldp x29, x30, [sp], #32
     ret
 .size noop_decompress, .-noop_decompress

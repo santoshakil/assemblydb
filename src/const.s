@@ -21,6 +21,8 @@
 .equ SYS_writev,        66
 .equ SYS_pread64,       67
 .equ SYS_pwrite64,      68
+.equ SYS_sendfile,      71
+.equ SYS_fstat,         80
 .equ SYS_fdatasync,     83
 .equ SYS_fsync,         82
 .equ SYS_exit,          93
@@ -32,7 +34,7 @@
 .equ SYS_clone,         220
 .equ SYS_mmap,          222
 .equ SYS_madvise,       233
-.equ SYS_getdents64,    261
+.equ SYS_getdents64,    61
 
 // ============================================================================
 // File Open Flags
@@ -405,6 +407,7 @@
 .equ MET_MT_FLUSHES,        0x90
 .equ MET_SST_COUNT,         0x98
 .equ METRICS_SIZE,          0x100
+.equ MET_SIZE,              METRICS_SIZE
 
 // ============================================================================
 // MVCC Version Entry (384 bytes)
@@ -439,6 +442,13 @@
 .equ TX_ACTIVE,             0
 .equ TX_COMMITTED,          1
 .equ TX_ABORTED,            2
+
+// Transaction write-set node (linked list of buffered writes)
+.equ TXWN_KEY,              0x000   // 64B fixed key
+.equ TXWN_VAL,              0x040   // 256B fixed val
+.equ TXWN_IS_DELETE,        0x140   // 1B flag
+.equ TXWN_NEXT,             0x148   // 8B ptr to next node
+.equ TXWN_SIZE,             0x150   // 336B total
 
 // Isolation levels
 .equ ISO_READ_UNCOMMITTED,  0

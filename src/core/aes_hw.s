@@ -15,11 +15,10 @@
 .global aes_key_expand_256
 .type aes_key_expand_256, %function
 aes_key_expand_256:
-    stp x29, x30, [sp, #-64]!
+    stp x29, x30, [sp, #-48]!
     mov x29, sp
     stp x19, x20, [sp, #16]
     stp x21, x22, [sp, #32]
-    stp x23, x24, [sp, #48]
 
     mov x19, x1                    // expanded key output
 
@@ -27,13 +26,9 @@ aes_key_expand_256:
     ldp q0, q1, [x0]
     stp q0, q1, [x19]
 
-    // Load S-box address
-    adrp x2, .Laes_sbox
-    add x2, x2, :lo12:.Laes_sbox
-
-    // Load RCON table address
-    adrp x3, .Laes_rcon
-    add x3, x3, :lo12:.Laes_rcon
+    // Load S-box address into callee-saved x22
+    adrp x22, .Laes_sbox
+    add x22, x22, :lo12:.Laes_sbox
 
     mov w20, #8                    // i = 8 (word index)
     mov w21, #0                    // rcon_index
@@ -56,19 +51,21 @@ aes_key_expand_256:
 
     // SubWord(w5): 4 S-box lookups
     and x6, x5, #0xFF
-    ldrb w6, [x2, x6]
+    ldrb w6, [x22, x6]
     ubfx x7, x5, #8, #8
-    ldrb w7, [x2, x7]
+    ldrb w7, [x22, x7]
     orr w6, w6, w7, lsl #8
     ubfx x7, x5, #16, #8
-    ldrb w7, [x2, x7]
+    ldrb w7, [x22, x7]
     orr w6, w6, w7, lsl #16
     ubfx x7, x5, #24, #8
-    ldrb w7, [x2, x7]
+    ldrb w7, [x22, x7]
     orr w5, w6, w7, lsl #24
 
     // XOR with RCON (only first byte)
-    ldrb w6, [x3, x21]
+    adrp x6, .Laes_rcon
+    add x6, x6, :lo12:.Laes_rcon
+    ldrb w6, [x6, x21]
     eor w5, w5, w6
     add w21, w21, #1
     b .Lke_xor
@@ -80,15 +77,15 @@ aes_key_expand_256:
 
     // i % 8 == 4: SubWord only
     and x6, x5, #0xFF
-    ldrb w6, [x2, x6]
+    ldrb w6, [x22, x6]
     ubfx x7, x5, #8, #8
-    ldrb w7, [x2, x7]
+    ldrb w7, [x22, x7]
     orr w6, w6, w7, lsl #8
     ubfx x7, x5, #16, #8
-    ldrb w7, [x2, x7]
+    ldrb w7, [x22, x7]
     orr w6, w6, w7, lsl #16
     ubfx x7, x5, #24, #8
-    ldrb w7, [x2, x7]
+    ldrb w7, [x22, x7]
     orr w5, w6, w7, lsl #24
 
 .Lke_xor:
@@ -102,10 +99,9 @@ aes_key_expand_256:
     b .Lke_loop
 
 .Lke_done:
-    ldp x23, x24, [sp, #48]
     ldp x21, x22, [sp, #32]
     ldp x19, x20, [sp, #16]
-    ldp x29, x30, [sp], #64
+    ldp x29, x30, [sp], #48
     ret
 .size aes_key_expand_256, .-aes_key_expand_256
 
@@ -203,7 +199,7 @@ aes_ctr_process:
     // Process full 16-byte blocks
 .Lctr_loop:
     cmp x22, #16
-    b.lt .Lctr_tail
+    b.lo .Lctr_tail
 
     // Build counter: [page_id | counter] on stack, load as q
     stp x23, x5, [sp, #-16]!

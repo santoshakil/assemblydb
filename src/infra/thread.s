@@ -6,7 +6,7 @@
 
 .text
 
-.equ THREAD_STACK_SIZE,     0x10000   // 64 KB per thread stack
+// THREAD_STACK_SIZE defined in const.s (65536 = 0x10000)
 
 // ============================================================================
 // thread_create(fn, arg) -> tid or negative error

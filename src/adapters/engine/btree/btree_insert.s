@@ -27,14 +27,12 @@ btree_alloc_page:
 
     // Check if we need to grow
     cmp x20, x21
-    b.lt .Lap_have_space
+    b.lo .Lap_have_space
 
     // Grow file: double capacity (min 64 pages)
-    cmp x21, #64
-    csel x21, x21, x21, lt
     mov x1, #64
     cmp x21, x1
-    csel x21, x21, x1, gt
+    csel x21, x21, x1, hi            // capacity = max(capacity, 64)
     lsl x21, x21, #1              // double
 
     // ftruncate to new size
@@ -68,18 +66,18 @@ btree_alloc_page:
     mov w0, w20                    // return page_id
     add x20, x20, #1
     str x20, [x19, #DB_BTREE_NUM_PAGES]
-
-    // Zero the new page
+    // Keep page 0 metadata in sync (for btree_scan bounds checks)
     ldr x1, [x19, #DB_BTREE_MMAP]
+    str x20, [x1, #16]
+
+    // Zero the new page (x1 still holds DB_BTREE_MMAP)
     lsl x2, x0, #PAGE_SHIFT
     add x1, x1, x2
-    stp x29, x30, [sp, #-16]!     // nested save
-    mov x19, x0                    // save page_id
+    mov w20, w0                    // save page_id (x20 free after str at line 68)
     mov x0, x1
     mov x1, #PAGE_SIZE
     bl neon_memzero
-    mov w0, w19
-    ldp x29, x30, [sp], #16
+    mov w0, w20
 
     b .Lap_ret
 
@@ -132,7 +130,6 @@ btree_leaf_insert_at:
     mov x0, x19
     mov w1, w20
     bl btree_page_get_key_ptr
-    mov x25, x0             // key slot ptr
     mov x1, x21             // src key
     bl neon_copy_64
 
@@ -216,7 +213,7 @@ btree_leaf_split:
 
 .Llsp_copy_loop:
     cmp w25, w23
-    b.ge .Llsp_copy_done
+    b.hs .Llsp_copy_done
 
     sub w1, w25, w24        // dst_idx = i - mid
 
@@ -271,6 +268,10 @@ btree_leaf_split:
     ldr w0, [x22, #PH_NEXT_PAGE]
     cmn w0, #1
     b.eq .Llsp_no_update_next
+    // Bounds check old_next page_id
+    ldr x1, [x19, #DB_BTREE_NUM_PAGES]
+    cmp w0, w1
+    b.hs .Llsp_no_update_next
 
     ldr x1, [x19, #DB_BTREE_MMAP]
     lsl x0, x0, #PAGE_SHIFT
@@ -409,7 +410,7 @@ btree_int_split:
 
 .Lisp_key_loop:
     cmp w25, w23
-    b.ge .Lisp_children
+    b.hs .Lisp_children
 
     mov x0, x20
     mov w1, w25
@@ -433,7 +434,7 @@ btree_int_split:
 
 .Lisp_child_loop:
     cmp w25, w23
-    b.gt .Lisp_update_counts
+    b.hi .Lisp_update_counts
 
     add x0, x20, #BTREE_INT_CHILDREN_OFF
     ldr x3, [x0, w25, uxtw #3]
@@ -441,11 +442,17 @@ btree_int_split:
     add x0, x22, #BTREE_INT_CHILDREN_OFF
     str x3, [x0, w26, uxtw #3]
 
+    // Bounds check child page_id before parent pointer update
+    ldr x0, [x19, #DB_BTREE_NUM_PAGES]
+    cmp x3, x0
+    b.hs .Lisp_child_skip
+
     // Update child's parent pointer
     ldr x0, [x19, #DB_BTREE_MMAP]
     add x0, x0, x3, lsl #PAGE_SHIFT
     str w21, [x0, #PH_PARENT_PAGE]
 
+.Lisp_child_skip:
     add w25, w25, #1
     add w26, w26, #1
     b .Lisp_child_loop
@@ -573,7 +580,7 @@ btree_insert:
     // Check if leaf has room
     ldrh w28, [x25, #PH_NUM_KEYS]
     cmp w28, #BTREE_LEAF_MAX_KEYS
-    b.lt .Lbi_insert_direct
+    b.lo .Lbi_insert_direct
 
     // Leaf is full: need to split
     // Save leaf page_id before split (alloc inside split may remap)
@@ -689,7 +696,7 @@ btree_insert:
     // Check if parent has room
     ldrh w0, [x25, #PH_NUM_KEYS]
     cmp w0, #BTREE_INT_MAX_KEYS
-    b.ge .Lbi_split_internal
+    b.hs .Lbi_split_internal
 
     // Room in parent: find position and insert
     mov x0, x25
@@ -697,20 +704,22 @@ btree_insert:
     bl btree_page_binary_search
     // w0 = insert position
 
-    mov x1, x25             // page_ptr
-    mov w2, w0              // index
-    mov x0, x1
-    mov w1, w2
+    mov w1, w0              // index
+    mov x0, x25             // page_ptr
     mov x2, x20             // key_ptr
     mov x3, x26             // right_child (as x3)
     bl btree_int_insert_at
 
-    // Update right child's parent
+    // Update right child's parent (with bounds check)
+    ldr x0, [x19, #DB_BTREE_NUM_PAGES]
+    cmp w26, w0
+    b.hs .Lbi_rchild_ok
     ldr x23, [x19, #DB_BTREE_MMAP]
     lsl x0, x26, #PAGE_SHIFT
     add x0, x23, x0
     str w24, [x0, #PH_PARENT_PAGE]
 
+.Lbi_rchild_ok:
     mov x0, #ADB_OK
     b .Lbi_ret
 
@@ -733,6 +742,10 @@ btree_insert:
 
     mov w27, w0             // new_int_page_id
     ldr x23, [x19, #DB_BTREE_MMAP]
+
+    // Re-derive x25 (parent_ptr) - btree_int_split may have remapped mmap
+    lsl x0, x24, #PAGE_SHIFT
+    add x25, x23, x0
 
     // Save median key to sp+0 BEFORE any insertion (insertion may overwrite it)
     // The median is at old_node.keys[num_keys] (beyond valid range but data intact)
@@ -763,18 +776,21 @@ btree_insert:
     add x1, sp, #64         // our key
     bl btree_page_binary_search
 
-    mov w2, w0
+    mov w1, w0
     mov x0, x25
-    mov w1, w2
     add x2, sp, #64         // key
     mov x3, x26             // right_child
     bl btree_int_insert_at
 
-    // Update right child parent
+    // Update right child parent (with bounds check)
+    ldr x0, [x19, #DB_BTREE_NUM_PAGES]
+    cmp w26, w0
+    b.hs .Lbi_rp_right_ok
     ldr x23, [x19, #DB_BTREE_MMAP]
     lsl x0, x26, #PAGE_SHIFT
     add x0, x23, x0
     str w27, [x0, #PH_PARENT_PAGE]
+.Lbi_rp_right_ok:
     b .Lbi_promote_median
 
 .Lbi_insert_left_int:
@@ -789,17 +805,21 @@ btree_insert:
     add x1, sp, #64         // our key
     bl btree_page_binary_search
 
-    mov w2, w0
+    mov w1, w0
     mov x0, x25
-    mov w1, w2
     add x2, sp, #64         // key
     mov x3, x26
     bl btree_int_insert_at
 
+    // Bounds check right_child parent update
+    ldr x0, [x19, #DB_BTREE_NUM_PAGES]
+    cmp w26, w0
+    b.hs .Lbi_rp_left_ok
     ldr x23, [x19, #DB_BTREE_MMAP]
     lsl x0, x26, #PAGE_SHIFT
     add x0, x23, x0
     str w24, [x0, #PH_PARENT_PAGE]
+.Lbi_rp_left_ok:
 
 .Lbi_promote_median:
     // Write median key from stack to old node's keys[num_keys] (safe, beyond valid range)
@@ -887,16 +907,23 @@ btree_insert:
     mov w0, #1
     strh w0, [x28, #PH_NUM_KEYS]
 
-    // Update children's parent pointers
+    // Update children's parent pointers (with bounds checks)
     ldr x23, [x19, #DB_BTREE_MMAP]
+    ldr x3, [x19, #DB_BTREE_NUM_PAGES]
 
     ldr x0, [x19, #DB_BTREE_ROOT]
+    cmp x0, x3
+    b.hs .Lbi_nr_skip_left
     add x1, x23, x0, lsl #PAGE_SHIFT
     str w27, [x1, #PH_PARENT_PAGE]
+.Lbi_nr_skip_left:
 
+    cmp x26, x3
+    b.hs .Lbi_nr_skip_right
     lsl x1, x26, #PAGE_SHIFT
     add x1, x23, x1
     str w27, [x1, #PH_PARENT_PAGE]
+.Lbi_nr_skip_right:
 
     // Update root
     mov w0, w27

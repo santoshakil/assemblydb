@@ -59,8 +59,15 @@ syscall_to_adb_error:
     b.eq .Lste_exists
     cmp x0, #11                 // EAGAIN
     b.eq .Lste_locked
+    cmp x0, #4                  // EINTR
+    b.eq .Lste_io
+    cmp x0, #28                 // ENOSPC
+    b.eq .Lste_io
+    cmp x0, #5                  // EIO
+    b.eq .Lste_io
 
     // Default: I/O error
+.Lste_io:
     mov x0, #ADB_ERR_IO
     ret
 
@@ -80,3 +87,14 @@ syscall_to_adb_error:
     mov x0, #ADB_ERR_EXISTS
     ret
 .size syscall_to_adb_error, .-syscall_to_adb_error
+
+// ============================================================================
+// not_impl_stub(...) -> ADB_ERR_INVALID
+// Safe stub for unimplemented vtable slots (prevents blr NULL crash)
+// ============================================================================
+.global not_impl_stub
+.type not_impl_stub, %function
+not_impl_stub:
+    mov x0, #ADB_ERR_INVALID
+    ret
+.size not_impl_stub, .-not_impl_stub

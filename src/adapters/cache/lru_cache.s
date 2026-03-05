@@ -61,6 +61,7 @@ lru_cache_create:
     stp x21, x22, [sp, #32]
 
     mov x19, x0                    // capacity
+    cbz x19, .Llcc_fail            // guard: capacity must be > 0
 
     // Hash table size = next power of 2 >= 2 * capacity
     lsl x20, x19, #1              // 2 * capacity
@@ -148,8 +149,7 @@ lru_cache_create:
 
 .Llcc_fail_free:
     mov x0, x21
-    mov x1, #LRU_HEADER_SIZE
-    bl free_mem
+    bl lru_cache_destroy
 .Llcc_fail:
     mov x0, #0
 
@@ -267,7 +267,7 @@ lru_cache_fetch:
 .Llcf_next_probe:
     add x3, x3, #1
     cmp x3, x21
-    csel x3, xzr, x3, ge          // wrap around
+    csel x3, xzr, x3, hs          // wrap around (unsigned)
     cmp x3, x22
     b.eq .Llcf_miss                // full loop = not found
     b .Llcf_probe
@@ -310,7 +310,7 @@ lru_cache_insert:
     ldr x0, [x19, #LRU_COUNT]
     ldr x1, [x19, #LRU_CAPACITY]
     cmp x0, x1
-    b.ge .Llci_evict
+    b.hs .Llci_evict
 
     // Use next free frame (count is the index)
     mov x22, x0                    // frame index
@@ -384,14 +384,57 @@ lru_cache_insert:
     b.eq .Llci_evict_done          // empty slot = not in table
     add x6, x6, #1
     cmp x6, x5
-    csel x6, xzr, x6, ge
+    csel x6, xzr, x6, hs
     cmp x6, x9
     b.eq .Llci_evict_done          // wrapped around
     b .Llci_clear_probe
 
 .Llci_clear_found:
+    // Backward-shift deletion: rehash entries after the cleared slot
+    // to avoid breaking open-addressing probe chains
+    mov x10, x6                    // empty = cleared slot
+.Llci_bsd_loop:
+    add x6, x6, #1
+    cmp x6, x5
+    csel x6, xzr, x6, hs          // wrap (unsigned)
+    ldr x7, [x4, x6, lsl #3]
+    cmn x7, #1
+    b.eq .Llci_bsd_done            // hit empty slot, done
+    // Check if this entry's natural hash is "before" the empty slot
+    // in the circular probe order. If so, shift it back.
+    ldr x11, [x19, #LRU_FRAMES_PTR]
+    mov x12, #LF_SIZE
+    mul x12, x12, x7
+    add x11, x11, x12
+    ldr w12, [x11, #LF_PAGE_ID]
+    sub x13, x5, #1
+    and x13, x12, x13              // natural hash of this entry
+    // Check: is natural_hash in (empty, current]? If not, shift it.
+    // For circular range: if empty < current, entry belongs if natural <= empty or natural > current
+    // if empty >= current (wrapped), entry belongs if natural <= empty AND natural > current
+    cmp x10, x6
+    b.hi .Llci_bsd_wrapped
+    // No wrap: empty < current
+    cmp x13, x10
+    b.ls .Llci_bsd_move             // natural <= empty -> move
+    cmp x13, x6
+    b.hi .Llci_bsd_move             // natural > current -> move
+    b .Llci_bsd_loop
+.Llci_bsd_wrapped:
+    // Wrapped: empty >= current
+    // Move only if BOTH: natural <= empty AND natural > current
+    cmp x13, x10
+    b.hi .Llci_bsd_loop             // natural > empty -> skip
+    cmp x13, x6
+    b.ls .Llci_bsd_loop             // natural <= current -> skip
+    b .Llci_bsd_move                // both conditions met -> move
+.Llci_bsd_move:
+    str x7, [x4, x10, lsl #3]     // move entry to empty slot
+    mov x10, x6                    // new empty = this slot
+    b .Llci_bsd_loop
+.Llci_bsd_done:
     movn x7, #0
-    str x7, [x4, x6, lsl #3]
+    str x7, [x4, x10, lsl #3]     // mark final empty slot
 
 .Llci_evict_done:
     // Decrement count
@@ -430,7 +473,7 @@ lru_cache_insert:
     b.eq .Llci_hash_insert
     add x7, x7, #1
     cmp x7, x5
-    csel x7, xzr, x7, ge
+    csel x7, xzr, x7, hs
     b .Llci_hash_probe
 .Llci_hash_insert:
     str x22, [x4, x7, lsl #3]
@@ -490,6 +533,7 @@ lru_cache_unpin:
     ldr x3, [x0, #LRU_HASH_SIZE]
     sub x4, x3, #1
     and x4, x1, x4                // hash = page_id & (hash_size - 1)
+    mov x10, x4                    // save start for wrap-around check
 
     ldr x5, [x0, #LRU_FRAMES_PTR]
 
@@ -508,16 +552,18 @@ lru_cache_unpin:
     cbz w9, .Llcu_next
 
     // Found: decrement pin count
-    ldr w10, [x7, #LF_PIN_COUNT]
-    subs w10, w10, #1
-    csel w10, wzr, w10, mi         // clamp to 0
-    str w10, [x7, #LF_PIN_COUNT]
+    ldr w11, [x7, #LF_PIN_COUNT]
+    subs w11, w11, #1
+    csel w11, wzr, w11, mi         // clamp to 0
+    str w11, [x7, #LF_PIN_COUNT]
     ret
 
 .Llcu_next:
     add x4, x4, #1
     cmp x4, x3
-    csel x4, xzr, x4, ge
+    csel x4, xzr, x4, hs
+    cmp x4, x10
+    b.eq .Llcu_done                // wrapped around = not found
     b .Llcu_probe
 
 .Llcu_done:
@@ -534,6 +580,7 @@ lru_cache_mark_dirty:
     ldr x3, [x0, #LRU_HASH_SIZE]
     sub x4, x3, #1
     and x4, x1, x4                // hash = page_id & (hash_size - 1)
+    mov x10, x4                    // save start for wrap-around check
 
     ldr x5, [x0, #LRU_FRAMES_PTR]
 
@@ -551,14 +598,16 @@ lru_cache_mark_dirty:
     b.ne .Llcmd_next
     cbz w9, .Llcmd_next
 
-    mov w10, #1
-    str w10, [x7, #LF_IS_DIRTY]
+    mov w11, #1
+    str w11, [x7, #LF_IS_DIRTY]
     ret
 
 .Llcmd_next:
     add x4, x4, #1
     cmp x4, x3
-    csel x4, xzr, x4, ge
+    csel x4, xzr, x4, hs
+    cmp x4, x10
+    b.eq .Llcmd_done               // wrapped around = not found
     b .Llcmd_probe
 
 .Llcmd_done:
@@ -584,3 +633,4 @@ lru_cache_stats:
 .hidden page_alloc
 .hidden page_free
 .hidden neon_copy_page
+.hidden lru_cache_destroy

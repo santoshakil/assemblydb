@@ -16,10 +16,6 @@
 .global key_compare
 .type key_compare, %function
 key_compare:
-    // Load key lengths (first 2 bytes of each key)
-    ldrh w2, [x0]              // len_a
-    ldrh w3, [x1]              // len_b
-
     // Compare data bytes at offset 2 (62 bytes of data)
     // Using NEON: compare 16 bytes at a time
     // Since keys are zero-padded, comparing all 62 bytes works correctly
@@ -64,16 +60,18 @@ key_compare:
     ldrb w8, [x5], #1
     ldrb w9, [x6], #1
     cmp w8, w9
-    b.lt .Lkc_less
-    b.gt .Lkc_greater
+    b.lo .Lkc_less
+    b.hi .Lkc_greater
     sub w7, w7, #1
     b .Lkc_tail
 
 .Lkc_data_equal:
     // All data bytes equal - compare lengths
+    ldrh w2, [x0]              // len_a
+    ldrh w3, [x1]              // len_b
     cmp w2, w3
-    b.lt .Lkc_less
-    b.gt .Lkc_greater
+    b.lo .Lkc_less
+    b.hi .Lkc_greater
     mov x0, #0
     ret
 
@@ -127,7 +125,7 @@ key_compare:
     ldrb w8, [x5, x7]
     ldrb w9, [x6, x7]
     cmp w8, w9
-    b.lt .Lkc_less
+    b.lo .Lkc_less
     b .Lkc_greater
 .size key_compare, .-key_compare
 
@@ -179,7 +177,7 @@ build_fixed_key:
     mov x19, x0                // dst
     mov x20, x1                // src
 
-    // Zero the entire 64 bytes
+    // Zero the entire 64 bytes (inline NEON, preserves x2)
     movi v0.16b, #0
     stp q0, q0, [x19]
     stp q0, q0, [x19, #32]
@@ -187,16 +185,12 @@ build_fixed_key:
     // Write length prefix (2 bytes, little-endian)
     strh w2, [x19]
 
-    // Copy data bytes
+    // Copy data bytes using bulk copy
     cbz x2, .Lbfk_done
     add x0, x19, #2            // dst = key + 2
     mov x1, x20                // src
-    // Copy x2 bytes
-.Lbfk_copy:
-    ldrb w3, [x1], #1
-    strb w3, [x0], #1
-    subs x2, x2, #1
-    b.ne .Lbfk_copy
+    // x2 = len (already set)
+    bl neon_memcpy
 
 .Lbfk_done:
     ldp x19, x20, [sp, #16]
@@ -212,31 +206,32 @@ build_fixed_key:
 .global build_fixed_val
 .type build_fixed_val, %function
 build_fixed_val:
-    stp x29, x30, [sp, #-32]!
+    stp x29, x30, [sp, #-48]!
     mov x29, sp
     stp x19, x20, [sp, #16]
+    str x21, [sp, #32]
 
-    mov x19, x0
-    mov x20, x1
+    mov x19, x0                // dst
+    mov x20, x1                // src
+    mov w21, w2                 // src_len (save to callee-saved)
 
     // Zero 256 bytes
+    mov x0, x19
     bl neon_zero_256
 
     // Write length prefix
-    strh w2, [x19]
+    strh w21, [x19]
 
-    // Copy data
-    cbz x2, .Lbfv_done
-    add x0, x19, #2
-    mov x1, x20
-.Lbfv_copy:
-    ldrb w3, [x1], #1
-    strb w3, [x0], #1
-    subs x2, x2, #1
-    b.ne .Lbfv_copy
+    // Copy data using bulk copy
+    cbz w21, .Lbfv_done
+    add x0, x19, #2            // dst + 2
+    mov x1, x20                // src
+    mov w2, w21                 // len
+    bl neon_memcpy
 
 .Lbfv_done:
+    ldr x21, [sp, #32]
     ldp x19, x20, [sp, #16]
-    ldp x29, x30, [sp], #32
+    ldp x29, x30, [sp], #48
     ret
 .size build_fixed_val, .-build_fixed_val

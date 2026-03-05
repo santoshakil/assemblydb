@@ -66,6 +66,7 @@ lz4_compress:
     stp x25, x26, [sp, #64]
     stp x27, x28, [sp, #80]
 
+    cbz x0, .Llc_null_ctx          // NULL ctx guard
     mov x19, x0                    // ctx (hash table)
     mov x20, x1                    // input base
     mov x21, x2                    // in_len
@@ -82,18 +83,19 @@ lz4_compress:
 
     // If input too small, just emit as literals
     cmp x21, #LZ4_MIN_MATCH
-    b.lt .Llc_final_lit
+    b.lo .Llc_final_lit
 
     // Hash constant: 0x9E3779B1 (Knuth multiplicative hash)
     movz w27, #0x79B1
     movk w27, #0x9E37, lsl #16
+    mov w28, #LZ4_MAX_OFFSET       // hoist constant out of loop
 
     // Main compression loop
 .Llc_main:
     // Need at least 5 bytes ahead (min match + 1 literal after)
     add x0, x24, #5
     cmp x0, x21
-    b.ge .Llc_final_lit
+    b.hs .Llc_final_lit
 
     // Read 4 bytes at current pos, compute hash
     ldr w0, [x20, x24]
@@ -108,12 +110,11 @@ lz4_compress:
 
     // Check if ref is valid
     cmp w2, w25                    // ref >= anchor?
-    b.lt .Llc_no_match
+    b.lo .Llc_no_match             // unsigned compare
 
     // Check offset > 0 and in range (65535 max)
     sub w3, w24, w2
     cbz w3, .Llc_no_match          // offset 0 = self-reference, invalid
-    mov w28, #LZ4_MAX_OFFSET
     cmp w3, w28
     b.hi .Llc_no_match
 
@@ -134,7 +135,7 @@ lz4_compress:
     add x8, x2, x6                // ref + match_len
 .Llc_extend:
     cmp x7, x21
-    b.ge .Llc_match_done
+    b.hs .Llc_match_done
     ldrb w9, [x20, x7]
     ldrb w10, [x20, x8]
     cmp w9, w10
@@ -151,28 +152,31 @@ lz4_compress:
     // Build token byte
     sub x9, x6, #LZ4_MIN_MATCH   // match_len - 4
 
-    // Literal nibble
-    cmp x5, #15
-    csel x10, x5, x10, lt
+    // Literal nibble: min(lit_len, 15)
     mov x10, #15
     cmp x5, #15
-    csel x10, x5, x10, lt         // min(lit_len, 15)
+    csel x10, x5, x10, lo         // unsigned: min(lit_len, 15)
 
     // Match nibble
     mov x11, #15
     cmp x9, #15
-    csel x11, x9, x11, lt         // min(match_len-4, 15)
+    csel x11, x9, x11, lo         // unsigned: min(match_len-4, 15)
 
     // Token = (lit_nibble << 4) | match_nibble
     lsl w10, w10, #4
     orr w10, w10, w11
 
-    // Check output space (rough: token + extras + literals + offset + extras)
-    add x12, x5, x6
-    add x12, x12, #16             // generous estimate
+    // Check output space: lit + match + extra_bytes + fixed_overhead
+    // extra_bytes ≈ lit_len/256 + match_len/256 (fast approximation)
+    add x12, x5, x6               // lit_len + match_len
+    lsr x13, x5, #8               // lit_len / 256
+    add x12, x12, x13
+    lsr x13, x6, #8               // match_len / 256
+    add x12, x12, x13
+    add x12, x12, #6              // token(1) + offset(2) + rounding(3)
     add x13, x26, x12
     cmp x13, x23
-    b.ge .Llc_overflow
+    b.hs .Llc_overflow
 
     // Write token
     strb w10, [x22, x26]
@@ -180,11 +184,11 @@ lz4_compress:
 
     // Write extra literal length bytes
     cmp x5, #15
-    b.lt .Llc_copy_lit
+    b.lo .Llc_copy_lit
     sub x12, x5, #15
 .Llc_lit_extra:
     cmp x12, #255
-    b.lt .Llc_lit_extra_last
+    b.lo .Llc_lit_extra_last
     mov w13, #255
     strb w13, [x22, x26]
     add x26, x26, #1
@@ -200,7 +204,7 @@ lz4_compress:
     mov x12, #0
 .Llc_lit_copy_loop:
     cmp x12, x5
-    b.ge .Llc_write_offset
+    b.hs .Llc_write_offset         // unsigned compare
     add x13, x25, x12
     ldrb w14, [x20, x13]
     add x15, x26, x12
@@ -220,11 +224,11 @@ lz4_compress:
 
     // Write extra match length bytes
     cmp x9, #15
-    b.lt .Llc_advance
+    b.lo .Llc_advance
     sub x12, x9, #15
 .Llc_match_extra:
     cmp x12, #255
-    b.lt .Llc_match_extra_last
+    b.lo .Llc_match_extra_last
     mov w13, #255
     strb w13, [x22, x26]
     add x26, x26, #1
@@ -249,27 +253,29 @@ lz4_compress:
     sub x5, x21, x25              // literal_len
     cbz x5, .Llc_done
 
-    // Check output space
-    add x12, x5, #8
+    // Check output space: lit_len + extra_bytes + token
+    lsr x12, x5, #8               // lit_len / 256 (extra length bytes)
+    add x12, x12, x5              // + literal bytes
+    add x12, x12, #3              // token(1) + rounding(2)
     add x13, x26, x12
     cmp x13, x23
-    b.ge .Llc_overflow
+    b.hs .Llc_overflow
 
     // Token: literal_len, match_len = 0
     mov x10, #15
     cmp x5, #15
-    csel x10, x5, x10, lt
+    csel x10, x5, x10, lo         // unsigned
     lsl w10, w10, #4
     strb w10, [x22, x26]
     add x26, x26, #1
 
     // Extra literal length
     cmp x5, #15
-    b.lt .Llc_final_copy
+    b.lo .Llc_final_copy
     sub x12, x5, #15
 .Llc_final_extra:
     cmp x12, #255
-    b.lt .Llc_final_extra_last
+    b.lo .Llc_final_extra_last
     mov w13, #255
     strb w13, [x22, x26]
     add x26, x26, #1
@@ -283,7 +289,7 @@ lz4_compress:
     mov x12, #0
 .Llc_final_loop:
     cmp x12, x5
-    b.ge .Llc_done
+    b.hs .Llc_done                 // unsigned compare
     add x13, x25, x12
     ldrb w14, [x20, x13]
     add x15, x26, x12
@@ -293,6 +299,11 @@ lz4_compress:
 
 .Llc_done:
     add x0, x26, x5               // total output size
+    b .Llc_ret
+
+.Llc_null_ctx:
+    mov x0, #ADB_ERR_INVALID
+    neg x0, x0
     b .Llc_ret
 
 .Llc_overflow:
@@ -337,7 +348,7 @@ lz4_decompress:
     // Check if we've consumed all input
     add x0, x19, x23
     cmp x0, x25
-    b.ge .Lld_done
+    b.hs .Lld_done
 
     // Read token byte
     ldrb w0, [x19, x23]
@@ -354,30 +365,34 @@ lz4_decompress:
 .Lld_lit_ext:
     add x3, x19, x23
     cmp x3, x25
-    b.ge .Lld_err
+    b.hs .Lld_err
     ldrb w3, [x19, x23]
     add x23, x23, #1
-    add w1, w1, w3
+    add x1, x1, x3, uxtb          // 64-bit add, zero-extend byte
     cmp w3, #255
     b.eq .Lld_lit_ext
 
 .Lld_copy_lit:
     // Copy literal_len bytes from input to output
-    cbz w1, .Lld_check_end
-    // Bounds check
+    cbz x1, .Lld_check_end
+    // Input bounds check: in_pos + literal_len <= in_len
+    add x3, x23, x1
+    cmp x3, x20
+    b.hi .Lld_err
+    // Output bounds check: out_pos + literal_len <= out_capacity
     add x3, x24, x1
     cmp x3, x22
     b.hi .Lld_err
 
-    mov w3, #0
+    mov x3, #0
 .Lld_lit_loop:
-    cmp w3, w1
-    b.ge .Lld_lit_done
+    cmp x3, x1
+    b.hs .Lld_lit_done             // unsigned compare
     add x4, x23, x3
     ldrb w5, [x19, x4]
     add x6, x24, x3
     strb w5, [x21, x6]
-    add w3, w3, #1
+    add x3, x3, #1
     b .Lld_lit_loop
 
 .Lld_lit_done:
@@ -388,14 +403,14 @@ lz4_decompress:
     // If we've consumed all input, done (last sequence has no match)
     add x0, x19, x23
     cmp x0, x25
-    b.ge .Lld_done
+    b.hs .Lld_done
 
     // Read match offset (2 bytes, little-endian)
     ldrb w3, [x19, x23]
     add x23, x23, #1
     add x0, x19, x23
     cmp x0, x25
-    b.ge .Lld_err
+    b.hs .Lld_err
     ldrb w4, [x19, x23]
     add x23, x23, #1
     orr w3, w3, w4, lsl #8        // offset
@@ -406,24 +421,18 @@ lz4_decompress:
     add w2, w2, #LZ4_MIN_MATCH
 
     // Extended match length
-    and w5, w2, #0xFF              // save base
-    sub w5, w5, #LZ4_MIN_MATCH
-    add w5, w5, #LZ4_MIN_MATCH    // w2 already has +4
-    cmp w5, #19                    // 15 + 4
-    b.lt .Lld_no_match_ext
-
-    // Check if original nibble was 15
-    sub w5, w2, #LZ4_MIN_MATCH
+    // Check if match length needs extension (nibble was 15)
+    sub w5, w2, #LZ4_MIN_MATCH    // original nibble value
     cmp w5, #15
     b.ne .Lld_no_match_ext
 
 .Lld_match_ext:
     add x0, x19, x23
     cmp x0, x25
-    b.ge .Lld_err
+    b.hs .Lld_err
     ldrb w5, [x19, x23]
     add x23, x23, #1
-    add w2, w2, w5
+    add x2, x2, x5, uxtb          // 64-bit add, zero-extend byte
     cmp w5, #255
     b.eq .Lld_match_ext
 
@@ -439,15 +448,15 @@ lz4_decompress:
     cmp x6, x22
     b.hi .Lld_err                  // overflow
 
-    mov w6, #0
+    mov x6, #0
 .Lld_match_loop:
-    cmp w6, w2
-    b.ge .Lld_match_done
+    cmp x6, x2
+    b.hs .Lld_match_done           // unsigned compare
     add x7, x5, x6
     ldrb w8, [x21, x7]
     add x9, x24, x6
     strb w8, [x21, x9]
-    add w6, w6, #1
+    add x6, x6, #1
     b .Lld_match_loop
 
 .Lld_match_done:

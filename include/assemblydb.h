@@ -76,6 +76,7 @@ typedef struct {
     uint64_t page_merges;
     uint64_t memtable_flushes;
     uint64_t sstable_count;
+    uint64_t _reserved[12];         /* pad to 256 bytes (MET_SIZE) */
 } adb_metrics_t;
 
 /* Batch entry */

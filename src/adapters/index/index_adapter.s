@@ -23,8 +23,10 @@ index_adapter_init:
     add x1, x1, :lo12:sec_index_insert
     str x1, [x0, #IP_FN_INSERT]
 
-    // Delete not yet implemented
-    str xzr, [x0, #IP_FN_DELETE]
+    // Delete not yet implemented - safe stub prevents blr NULL
+    adrp x1, not_impl_stub
+    add x1, x1, :lo12:not_impl_stub
+    str x1, [x0, #IP_FN_DELETE]
 
     adrp x1, sec_index_scan
     add x1, x1, :lo12:sec_index_scan
@@ -33,6 +35,7 @@ index_adapter_init:
     ret
 .size index_adapter_init, .-index_adapter_init
 
+.hidden not_impl_stub
 .hidden sec_index_create
 .hidden sec_index_destroy
 .hidden sec_index_insert

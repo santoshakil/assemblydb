@@ -11,6 +11,13 @@ static uint64_t now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
+static void cleanup_path(const char *path) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", path);
+    int rc = system(cmd);
+    (void)rc;
+}
+
 static void fmt_rate(double ops_per_sec, char *buf, size_t len) {
     if (ops_per_sec >= 1e6)
         snprintf(buf, len, "%.2f M ops/sec", ops_per_sec / 1e6);
@@ -263,7 +270,7 @@ static void bench_api_put(int num_keys) {
     char label[64];
     snprintf(label, sizeof(label), "adb_put (%d keys)", num_keys);
 
-    system("rm -rf /tmp/bench_adb_put");
+    cleanup_path("/tmp/bench_adb_put");
     adb_t *db = NULL;
     int rc = adb_open("/tmp/bench_adb_put", NULL, &db);
     if (rc != 0 || !db) { printf("  %-28s FAILED (open)\n", label); return; }
@@ -283,14 +290,14 @@ static void bench_api_put(int num_keys) {
     printf("  %-28s %s\n", label, rbuf);
 
     adb_close(db);
-    system("rm -rf /tmp/bench_adb_put");
+    cleanup_path("/tmp/bench_adb_put");
 }
 
 static void bench_api_get(int num_keys) {
     char label[64];
     snprintf(label, sizeof(label), "adb_get (%d keys)", num_keys);
 
-    system("rm -rf /tmp/bench_adb_get");
+    cleanup_path("/tmp/bench_adb_get");
     adb_t *db = NULL;
     int rc = adb_open("/tmp/bench_adb_get", NULL, &db);
     if (rc != 0 || !db) { printf("  %-28s FAILED (open)\n", label); return; }
@@ -319,14 +326,14 @@ static void bench_api_get(int num_keys) {
     printf("  %-28s %s\n", label, rbuf);
 
     adb_close(db);
-    system("rm -rf /tmp/bench_adb_get");
+    cleanup_path("/tmp/bench_adb_get");
 }
 
 static void bench_api_mixed(int num_keys) {
     char label[64];
     snprintf(label, sizeof(label), "mixed r/w (%d ops)", num_keys * 2);
 
-    system("rm -rf /tmp/bench_adb_mix");
+    cleanup_path("/tmp/bench_adb_mix");
     adb_t *db = NULL;
     int rc = adb_open("/tmp/bench_adb_mix", NULL, &db);
     if (rc != 0 || !db) { printf("  %-28s FAILED (open)\n", label); return; }
@@ -354,11 +361,11 @@ static void bench_api_mixed(int num_keys) {
     printf("  %-28s %s\n", label, rbuf);
 
     adb_close(db);
-    system("rm -rf /tmp/bench_adb_mix");
+    cleanup_path("/tmp/bench_adb_mix");
 }
 
 static void bench_api_batch(void) {
-    system("rm -rf /tmp/bench_adb_batch");
+    cleanup_path("/tmp/bench_adb_batch");
     adb_t *db = NULL;
     int rc = adb_open("/tmp/bench_adb_batch", NULL, &db);
     if (rc != 0 || !db) { printf("  %-28s FAILED (open)\n", "adb_batch_put (1000)"); return; }
@@ -390,11 +397,11 @@ static void bench_api_batch(void) {
     free(keys);
     free(vals);
     adb_close(db);
-    system("rm -rf /tmp/bench_adb_batch");
+    cleanup_path("/tmp/bench_adb_batch");
 }
 
 static void bench_api_transactions(void) {
-    system("rm -rf /tmp/bench_adb_tx");
+    cleanup_path("/tmp/bench_adb_tx");
     adb_t *db = NULL;
     int rc = adb_open("/tmp/bench_adb_tx", NULL, &db);
     if (rc != 0 || !db) { printf("  %-28s FAILED (open)\n", "tx begin+commit (1000)"); return; }
@@ -414,11 +421,11 @@ static void bench_api_transactions(void) {
     printf("  %-28s %s\n", "tx begin+commit (1000)", rbuf);
 
     adb_close(db);
-    system("rm -rf /tmp/bench_adb_tx");
+    cleanup_path("/tmp/bench_adb_tx");
 }
 
 static void bench_api_delete(void) {
-    system("rm -rf /tmp/bench_adb_del");
+    cleanup_path("/tmp/bench_adb_del");
     adb_t *db = NULL;
     int rc = adb_open("/tmp/bench_adb_del", NULL, &db);
     if (rc != 0 || !db) { printf("  %-28s FAILED (open)\n", "adb_delete (5000)"); return; }
@@ -447,7 +454,7 @@ static void bench_api_delete(void) {
     printf("  %-28s %s\n", "adb_delete (5000)", rbuf);
 
     adb_close(db);
-    system("rm -rf /tmp/bench_adb_del");
+    cleanup_path("/tmp/bench_adb_del");
 }
 
 // ============================================================================

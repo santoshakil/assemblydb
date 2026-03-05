@@ -1,13 +1,7 @@
 // AssemblyDB - Crypto Port Definition
-// Vtable storage for crypto_port_t
+// Vtable populated dynamically by crypto_adapter_init_*()
 
 .include "src/const.s"
 
-.data
-.align 3
-
-.global crypto_port_vtable
-.type crypto_port_vtable, %object
-crypto_port_vtable:
-    .zero CRYPTO_PORT_SIZE
-.size crypto_port_vtable, .-crypto_port_vtable
+.text
+// No static vtable needed; adapter allocates via alloc_zeroed

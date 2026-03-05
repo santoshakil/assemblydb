@@ -74,10 +74,6 @@ extern int btree_adapter_close(void *db);
 #define DB_BTREE_NUM_PAGES  0x068
 #define DB_BTREE_CAPACITY   0x070
 
-static void set_u64(void *db, int offset, uint64_t val) {
-    *(uint64_t *)((char *)db + offset) = val;
-}
-
 static uint64_t get_u64(void *db, int offset) {
     return *(uint64_t *)((char *)db + offset);
 }
@@ -119,7 +115,8 @@ static const char *test_dir = "/tmp/assemblydb_test_btree";
 static void cleanup_test_dir(void) {
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
-    system(cmd);
+    int rc = system(cmd);
+    (void)rc;
 }
 
 static int setup_test_dir(void) {

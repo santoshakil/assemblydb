@@ -72,6 +72,7 @@ static int tests_passed = 0;
 
 /* Use declarations from assemblydb.h, plus extras for PRNG */
 extern void prng_seed(uint64_t seed);
+extern int compact_memtable(void *db);
 
 static void set_u64(void *db, int offset, uint64_t val) {
     *(uint64_t *)((char *)db + offset) = val;
@@ -560,6 +561,108 @@ static void test_lsm_delete(void) {
     PASS();
 }
 
+static void test_lsm_get_after_compact_memtable(void) {
+    TEST("lsm get after memtable flush to SST");
+
+    int dir_fd = setup_test_dir();
+    if (dir_fd < 0) { FAIL("setup dir"); return; }
+
+    uint8_t db[DB_SIZE];
+    memset(db, 0, DB_SIZE);
+    set_u64(db, DB_DIR_FD, (uint64_t)(int64_t)dir_fd);
+    prng_seed(42);
+
+    int rc = lsm_adapter_init(db);
+    if (rc != 0) { FAIL("init failed"); close(dir_fd); cleanup_test_dir(); return; }
+
+    uint8_t key[64], val[256], val_out[256];
+    make_key(key, "flush_key");
+    make_val(val, "flush_val");
+
+    rc = lsm_put(db, key, val, 0);
+    if (rc != 0) { FAIL("put failed"); lsm_adapter_close(db); close(dir_fd); cleanup_test_dir(); return; }
+
+    rc = compact_memtable(db);
+    if (rc != 0) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "compact_memtable rc=%d", rc);
+        FAIL(msg);
+        lsm_adapter_close(db);
+        close(dir_fd);
+        cleanup_test_dir();
+        return;
+    }
+
+    memset(val_out, 0, 256);
+    rc = lsm_get(db, key, val_out, 0);
+    if (rc != 0) { FAIL("get after flush failed"); lsm_adapter_close(db); close(dir_fd); cleanup_test_dir(); return; }
+
+    uint16_t vlen = *(uint16_t *)val_out;
+    if (vlen != 9 || memcmp(val_out + 2, "flush_val", 9) != 0) {
+        FAIL("value mismatch after flush");
+        lsm_adapter_close(db);
+        close(dir_fd);
+        cleanup_test_dir();
+        return;
+    }
+
+    lsm_adapter_close(db);
+    close(dir_fd);
+    cleanup_test_dir();
+    PASS();
+}
+
+static void test_lsm_tombstone_masks_flushed_sstable(void) {
+    TEST("lsm tombstone masks older flushed value");
+
+    int dir_fd = setup_test_dir();
+    if (dir_fd < 0) { FAIL("setup dir"); return; }
+
+    uint8_t db[DB_SIZE];
+    memset(db, 0, DB_SIZE);
+    set_u64(db, DB_DIR_FD, (uint64_t)(int64_t)dir_fd);
+    prng_seed(42);
+
+    int rc = lsm_adapter_init(db);
+    if (rc != 0) { FAIL("init failed"); close(dir_fd); cleanup_test_dir(); return; }
+
+    uint8_t key[64], val[256], val_out[256];
+    make_key(key, "shadow_key");
+    make_val(val, "old_value");
+
+    rc = lsm_put(db, key, val, 0);
+    if (rc != 0) { FAIL("put failed"); lsm_adapter_close(db); close(dir_fd); cleanup_test_dir(); return; }
+
+    rc = compact_memtable(db);
+    if (rc != 0) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "compact_memtable rc=%d", rc);
+        FAIL(msg);
+        lsm_adapter_close(db);
+        close(dir_fd);
+        cleanup_test_dir();
+        return;
+    }
+
+    rc = lsm_delete(db, key, 0);
+    if (rc != 0) { FAIL("delete failed"); lsm_adapter_close(db); close(dir_fd); cleanup_test_dir(); return; }
+
+    memset(val_out, 0, 256);
+    rc = lsm_get(db, key, val_out, 0);
+    if (rc == 0) {
+        FAIL("stale SST value visible despite tombstone");
+        lsm_adapter_close(db);
+        close(dir_fd);
+        cleanup_test_dir();
+        return;
+    }
+
+    lsm_adapter_close(db);
+    close(dir_fd);
+    cleanup_test_dir();
+    PASS();
+}
+
 /* ============ WAL Tests ============ */
 
 static void test_wal_write_sync(void) {
@@ -929,6 +1032,8 @@ int main(void) {
     test_lsm_put_get();
     test_lsm_multiple_keys();
     test_lsm_delete();
+    test_lsm_get_after_compact_memtable();
+    test_lsm_tombstone_masks_flushed_sstable();
 
     printf("\n--- WAL ---\n");
     test_wal_write_sync();

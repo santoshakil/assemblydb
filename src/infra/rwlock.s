@@ -54,7 +54,7 @@ rwlock_rdlock:
     sub w0, w0, #1
     cbz w0, .Lrl_futex_wait
     yield
-    ldr w1, [x19]
+    ldar w1, [x19]
     cmp w1, #0
     b.ge .Lrl_retry
     b .Lrl_spin
@@ -87,6 +87,8 @@ rwlock_rdunlock:
 
 .Lru_retry:
     ldaxr w1, [x19]
+    cmp w1, #1
+    b.lt .Lru_bad                  // underflow guard: state must be >= 1
     sub w2, w1, #1
     stlxr w3, w2, [x19]
     cbnz w3, .Lru_retry
@@ -102,6 +104,9 @@ rwlock_rdunlock:
     mov x5, #0
     bl sys_futex
 
+.Lru_bad:
+    clrex                          // underflow: release exclusive monitor
+    b .Lru_done                    // return without waking (not holding lock)
 .Lru_done:
     ldr x19, [sp, #16]
     ldp x29, x30, [sp], #32
@@ -143,12 +148,12 @@ rwlock_wrlock:
     sub w0, w0, #1
     cbz w0, .Lwl_futex
     yield
-    ldr w1, [x19]
+    ldar w1, [x19]
     cbz w1, .Lwl_retry
     b .Lwl_spin
 
 .Lwl_futex:
-    ldr w2, [x19]
+    ldar w2, [x19]
     mov x0, x19
     mov w1, #FUTEX_WAIT_PRIVATE
     // w2 = current value (expected)

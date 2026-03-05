@@ -6,28 +6,7 @@
 
 .text
 
-// Metrics layout (256 bytes, all uint64_t):
-.equ MET_PUTS,              0x00
-.equ MET_GETS,              0x08
-.equ MET_DELETES,           0x10
-.equ MET_SCANS,             0x18
-.equ MET_CACHE_HITS,        0x20
-.equ MET_CACHE_MISSES,      0x28
-.equ MET_BLOOM_TP,          0x30
-.equ MET_BLOOM_FP,          0x38
-.equ MET_BYTES_WRITTEN,     0x40
-.equ MET_BYTES_READ,        0x48
-.equ MET_COMPACTIONS,       0x50
-.equ MET_COMPACT_BYTES,     0x58
-.equ MET_WAL_SYNCS,         0x60
-.equ MET_WAL_BYTES,         0x68
-.equ MET_TX_COMMITS,        0x70
-.equ MET_TX_ROLLBACKS,      0x78
-.equ MET_PAGE_SPLITS,       0x80
-.equ MET_PAGE_MERGES,       0x88
-.equ MET_MT_FLUSHES,        0x90
-.equ MET_SST_COUNT,         0x98
-.equ MET_SIZE,              0x100
+// Metrics layout: see const.s for MET_* offsets and METRICS_SIZE
 
 // ============================================================================
 // metrics_init(db_ptr) -> 0=ok, neg=error
@@ -151,3 +130,8 @@ metrics_destroy:
     ldp x29, x30, [sp], #32
     ret
 .size metrics_destroy, .-metrics_destroy
+
+.hidden alloc_zeroed
+.hidden free_mem
+.hidden neon_memcpy
+.hidden neon_memzero

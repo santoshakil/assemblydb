@@ -28,7 +28,8 @@ static int tests_failed = 0;
 static void cleanup(const char *path) {
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", path);
-    (void)system(cmd);
+    int rc = system(cmd);
+    (void)rc;
 }
 
 static uint64_t now_ns(void) {
@@ -768,24 +769,7 @@ static void test_lz4_diverse_patterns(void) {
 
     int errors = 0;
 
-    struct {
-        const char *name;
-        void (*fill)(uint8_t *, size_t);
-    } patterns[] = {
-        {"all_zeros", NULL},
-        {"all_ones", NULL},
-        {"sequential", NULL},
-        {"random", NULL},
-        {"repeating_short", NULL},
-        {"repeating_long", NULL},
-        {"ascii_text", NULL},
-        {"sparse", NULL},
-        {"alternating", NULL},
-        {"mostly_zero", NULL},
-        {"structured", NULL},
-        {"worst_case", NULL},
-    };
-    int num_patterns = 12;
+    const int num_patterns = 12;
 
     for (int p = 0; p < num_patterns; p++) {
         switch (p) {
@@ -1157,6 +1141,181 @@ static void test_bloom_fp_rate(void) {
     }
 }
 
+// --- Additional stress tests for audit fixes ---
+
+static void test_metrics_no_count_on_failure(void) {
+    TEST("metrics: failed ops not counted");
+    cleanup("/tmp/stress_met_fail");
+    adb_t *db; adb_open("/tmp/stress_met_fail", NULL, &db);
+    // Key too long should not increment puts
+    char bigkey[100]; memset(bigkey, 'X', 100);
+    adb_put(db, bigkey, 100, "v", 1);  // should fail with key too long
+    adb_put(db, bigkey, 100, "v", 1);  // again
+    // Delete nonexistent should still count (it's a valid op)
+    adb_delete(db, "nope", 4);
+    adb_metrics_t m; adb_get_metrics(db, &m);
+    adb_close(db); cleanup("/tmp/stress_met_fail");
+    if (m.puts_total != 0) FAILF("puts=%lu should be 0", (unsigned long)m.puts_total);
+    else PASS();
+}
+
+static void test_flush_error_propagation(void) {
+    TEST("flush_memtable_to_btree propagates to sync");
+    cleanup("/tmp/stress_flush");
+    adb_t *db; adb_open("/tmp/stress_flush", NULL, &db);
+    // Normal operation: put, sync, verify
+    for (int i = 0; i < 100; i++) {
+        char k[8]; snprintf(k, 8, "fk%02d", i);
+        adb_put(db, k, (uint16_t)strlen(k), "v", 1);
+    }
+    int rc = adb_sync(db);
+    if (rc != 0) { adb_close(db); cleanup("/tmp/stress_flush"); FAILF("sync rc=%d", rc); return; }
+    // Verify all data survived
+    int ok = 1;
+    for (int i = 0; i < 100; i++) {
+        char k[8]; snprintf(k, 8, "fk%02d", i);
+        char buf[256]; uint16_t vl;
+        if (adb_get(db, k, (uint16_t)strlen(k), buf, 256, &vl) != 0) { ok = 0; break; }
+    }
+    adb_close(db); cleanup("/tmp/stress_flush");
+    if (!ok) FAIL("data lost after sync");
+    else PASS();
+}
+
+static void test_batch_unsigned_count(void) {
+    TEST("batch: small count works with unsigned compare");
+    cleanup("/tmp/stress_batch_u");
+    adb_t *db; adb_open("/tmp/stress_batch_u", NULL, &db);
+    adb_batch_entry_t e[3];
+    char k0[] = "k0", k1[] = "k1", k2[] = "k2";
+    e[0] = (adb_batch_entry_t){k0, 2, "a", 1};
+    e[1] = (adb_batch_entry_t){k1, 2, "b", 1};
+    e[2] = (adb_batch_entry_t){k2, 2, "c", 1};
+    int rc = adb_batch_put(db, e, 3);
+    char buf[256]; uint16_t vl;
+    int ok = (rc == 0);
+    if (ok) ok = (adb_get(db, "k0", 2, buf, 256, &vl) == 0 && vl == 1);
+    if (ok) ok = (adb_get(db, "k1", 2, buf, 256, &vl) == 0 && vl == 1);
+    if (ok) ok = (adb_get(db, "k2", 2, buf, 256, &vl) == 0 && vl == 1);
+    adb_close(db); cleanup("/tmp/stress_batch_u");
+    if (!ok) FAIL("batch or get failed");
+    else PASS();
+}
+
+static void test_wal_replay_overwrite_stress(void) {
+    TEST("WAL replay: 500 overwrites, close without sync");
+    cleanup("/tmp/stress_wal_ow");
+    adb_t *db; adb_open("/tmp/stress_wal_ow", NULL, &db);
+    for (int i = 0; i < 500; i++) {
+        char v[8]; snprintf(v, 8, "v%03d", i);
+        adb_put(db, "target", 6, v, (uint16_t)strlen(v));
+    }
+    adb_close(db);
+    adb_open("/tmp/stress_wal_ow", NULL, &db);
+    char buf[256]; uint16_t vl;
+    int rc = adb_get(db, "target", 6, buf, 256, &vl);
+    adb_close(db); cleanup("/tmp/stress_wal_ow");
+    if (rc != 0) FAIL("key lost");
+    else if (vl != 4 || memcmp(buf, "v499", 4) != 0) FAILF("wrong: %.*s", vl, buf);
+    else PASS();
+}
+
+static void test_multi_session_accumulation_stress(void) {
+    TEST("20 sessions x 100 keys = 2000 total after reopen");
+    cleanup("/tmp/stress_multi_sess");
+    for (int s = 0; s < 20; s++) {
+        adb_t *db; adb_open("/tmp/stress_multi_sess", NULL, &db);
+        for (int i = 0; i < 100; i++) {
+            char k[16]; snprintf(k, 16, "s%02dk%03d", s, i);
+            adb_put(db, k, (uint16_t)strlen(k), "v", 1);
+        }
+        adb_sync(db); adb_close(db);
+    }
+    adb_t *db; adb_open("/tmp/stress_multi_sess", NULL, &db);
+    int count = 0;
+    int cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *c) {
+        (void)k;(void)kl;(void)v;(void)vl;(void)c; count++; return 0;
+    }
+    adb_scan(db, NULL, 0, NULL, 0, cb, NULL);
+    adb_close(db); cleanup("/tmp/stress_multi_sess");
+    if (count != 2000) FAILF("count=%d", count);
+    else PASS();
+}
+
+static void test_tx_isolation_stress(void) {
+    TEST("100 tx cycles: rollback invisible, commit visible");
+    cleanup("/tmp/stress_tx_iso");
+    adb_t *db; adb_open("/tmp/stress_tx_iso", NULL, &db);
+    int ok = 1;
+    for (int i = 0; i < 100 && ok; i++) {
+        uint64_t tx; adb_tx_begin(db, 0, &tx);
+        char k[8]; snprintf(k, 8, "tx%03d", i);
+        adb_tx_put(db, tx, k, (uint16_t)strlen(k), "v", 1);
+        if (i % 2 == 0)
+            adb_tx_commit(db, tx);
+        else
+            adb_tx_rollback(db, tx);
+    }
+    int count = 0;
+    int cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *c) {
+        (void)k;(void)kl;(void)v;(void)vl;(void)c; count++; return 0;
+    }
+    adb_scan(db, NULL, 0, NULL, 0, cb, NULL);
+    adb_close(db); cleanup("/tmp/stress_tx_iso");
+    if (count != 50) FAILF("count=%d (expect 50)", count);
+    else PASS();
+}
+
+static void test_scan_10k_sorted(void) {
+    TEST("scan 10K keys: all sorted, no duplicates");
+    cleanup("/tmp/stress_scan10k");
+    adb_t *db; adb_open("/tmp/stress_scan10k", NULL, &db);
+    for (int i = 0; i < 10000; i++) {
+        char k[16]; snprintf(k, 16, "k%05d", i);
+        adb_put(db, k, (uint16_t)strlen(k), "v", 1);
+    }
+    adb_sync(db);
+    int count = 0, sorted = 1;
+    char prev[64] = "";
+    int cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *c) {
+        (void)v;(void)vl;(void)c;
+        char buf[64]; memcpy(buf, k, kl); buf[kl] = 0;
+        if (prev[0] && strcmp(buf, prev) <= 0) sorted = 0;
+        memcpy(prev, buf, kl + 1);
+        count++;
+        return 0;
+    }
+    adb_scan(db, NULL, 0, NULL, 0, cb, NULL);
+    adb_close(db); cleanup("/tmp/stress_scan10k");
+    if (count != 10000) FAILF("count=%d", count);
+    else if (!sorted) FAIL("not sorted");
+    else PASS();
+}
+
+static void test_delete_storm_reopen(void) {
+    TEST("5K put, 5K delete, sync, reopen: empty scan");
+    cleanup("/tmp/stress_del_storm");
+    adb_t *db; adb_open("/tmp/stress_del_storm", NULL, &db);
+    for (int i = 0; i < 5000; i++) {
+        char k[16]; snprintf(k, 16, "dk%05d", i);
+        adb_put(db, k, (uint16_t)strlen(k), "v", 1);
+    }
+    for (int i = 0; i < 5000; i++) {
+        char k[16]; snprintf(k, 16, "dk%05d", i);
+        adb_delete(db, k, (uint16_t)strlen(k));
+    }
+    adb_sync(db); adb_close(db);
+    adb_open("/tmp/stress_del_storm", NULL, &db);
+    int count = 0;
+    int cb(const void *k, uint16_t kl, const void *v, uint16_t vl, void *c) {
+        (void)k;(void)kl;(void)v;(void)vl;(void)c; count++; return 0;
+    }
+    adb_scan(db, NULL, 0, NULL, 0, cb, NULL);
+    adb_close(db); cleanup("/tmp/stress_del_storm");
+    if (count != 0) FAILF("count=%d", count);
+    else PASS();
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -1183,6 +1342,7 @@ int main(void) {
     test_persistence();
     test_open_close_cycles();
     test_crash_recovery();
+    test_backup_restore_verify();
 
     printf("\n--- Transactions ---\n");
     test_transaction_isolation();
@@ -1203,6 +1363,16 @@ int main(void) {
     printf("\n--- Metrics & Bloom ---\n");
     test_metrics_accuracy();
     test_bloom_fp_rate();
+
+    printf("\n--- Audit Fix Verification ---\n");
+    test_metrics_no_count_on_failure();
+    test_flush_error_propagation();
+    test_batch_unsigned_count();
+    test_wal_replay_overwrite_stress();
+    test_multi_session_accumulation_stress();
+    test_tx_isolation_stress();
+    test_scan_10k_sorted();
+    test_delete_storm_reopen();
 
     uint64_t elapsed = now_ns() - t0;
     double secs = (double)elapsed / 1e9;

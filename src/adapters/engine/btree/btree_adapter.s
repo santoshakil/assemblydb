@@ -51,6 +51,8 @@ btree_adapter_init:
     mov x1, #0
     mov w2, #SEEK_END
     bl sys_lseek
+    cmp x0, #0
+    b.lt .Lba_init_fail_close
     mov x22, x0             // file_size
 
     // If empty, initialize with header page (page 0 = metadata)
@@ -130,7 +132,7 @@ btree_adapter_init:
     // Allocate storage_port vtable (64 bytes)
     mov x0, #STORAGE_PORT_SIZE
     bl alloc_zeroed
-    cbz x0, .Lba_init_fail_close
+    cbz x0, .Lba_init_fail_unmap
 
     // Populate vtable (PIC-safe: adrp + add)
     adrp x1, btree_adapter_put
@@ -163,6 +165,14 @@ btree_adapter_init:
 
     mov x0, #ADB_OK
     b .Lba_init_ret
+
+.Lba_init_fail_unmap:
+    // Clean up mmap before closing fd
+    ldr x0, [x19, #DB_BTREE_MMAP]
+    cbz x0, .Lba_init_fail_close
+    ldr x1, [x19, #DB_BTREE_MMAP_LEN]
+    bl sys_munmap
+    str xzr, [x19, #DB_BTREE_MMAP]
 
 .Lba_init_fail_close:
     mov x0, x21
@@ -252,17 +262,40 @@ btree_adapter_scan:
 .global btree_adapter_flush
 .type btree_adapter_flush, %function
 btree_adapter_flush:
-    stp x29, x30, [sp, #-16]!
+    stp x29, x30, [sp, #-32]!
     mov x29, sp
-    ldr x0, [x0, #DB_BTREE_FD]
-    bl sys_fdatasync
+    str x19, [sp, #16]
+
+    mov x19, x0
+
+    // Keep page-0 metadata in sync while DB remains open
+    ldr x0, [x19, #DB_BTREE_MMAP]
+    cbz x0, .Lbaf_sync_fd
+    ldr x1, [x19, #DB_BTREE_ROOT]
+    str x1, [x0, #8]
+    ldr x1, [x19, #DB_BTREE_NUM_PAGES]
+    str x1, [x0, #16]
+
+.Lbaf_sync_fd:
+    ldr x0, [x19, #DB_BTREE_FD]
     cmp x0, #0
-    b.ge 1f
+    b.lt .Lbaf_ok
+.Lbaf_sync_retry:
+    ldr x0, [x19, #DB_BTREE_FD]
+    bl sys_fdatasync
+    cmn x0, #4
+    b.eq .Lbaf_sync_retry
+    cmp x0, #0
+    b.ge .Lbaf_ok
     mov x0, #ADB_ERR_IO
-    b 2f
-1:  mov x0, #ADB_OK
-2:
-    ldp x29, x30, [sp], #16
+    b .Lbaf_ret
+
+.Lbaf_ok:
+    mov x0, #ADB_OK
+
+.Lbaf_ret:
+    ldr x19, [sp, #16]
+    ldp x29, x30, [sp], #32
     ret
 .size btree_adapter_flush, .-btree_adapter_flush
 
@@ -270,17 +303,23 @@ btree_adapter_flush:
 .global btree_adapter_sync
 .type btree_adapter_sync, %function
 btree_adapter_sync:
-    stp x29, x30, [sp, #-16]!
+    stp x29, x30, [sp, #-32]!
     mov x29, sp
-    ldr x0, [x0, #DB_BTREE_FD]
+    str x19, [sp, #16]
+    ldr x19, [x0, #DB_BTREE_FD]
+.Lbas_retry:
+    mov x0, x19
     bl sys_fsync
+    cmn x0, #4
+    b.eq .Lbas_retry
     cmp x0, #0
     b.ge 1f
     mov x0, #ADB_ERR_IO
     b 2f
 1:  mov x0, #ADB_OK
 2:
-    ldp x29, x30, [sp], #16
+    ldr x19, [sp, #16]
+    ldp x29, x30, [sp], #32
     ret
 .size btree_adapter_sync, .-btree_adapter_sync
 
@@ -290,9 +329,10 @@ btree_adapter_sync:
 btree_adapter_close:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
-    str x19, [sp, #16]
+    stp x19, x20, [sp, #16]
 
     mov x19, x0
+    mov w20, #0                    // error accumulator
 
     // Write metadata to page 0 before closing
     ldr x0, [x19, #DB_BTREE_MMAP]
@@ -305,8 +345,15 @@ btree_adapter_close:
     // Sync to disk
     ldr x0, [x19, #DB_BTREE_FD]
     cmp x0, #0
-    b.le .Lac_skip_sync
+    b.lt .Lac_skip_sync
+.Lac_sync_retry:
+    ldr x0, [x19, #DB_BTREE_FD]
     bl sys_fdatasync
+    cmn x0, #4
+    b.eq .Lac_sync_retry
+    cmp x0, #0
+    b.ge .Lac_skip_sync
+    mov w20, #ADB_ERR_IO
 .Lac_skip_sync:
 
     // munmap
@@ -320,7 +367,7 @@ btree_adapter_close:
     // close fd
     ldr x0, [x19, #DB_BTREE_FD]
     cmp x0, #0
-    b.le .Lac_no_fd
+    b.lt .Lac_no_fd
     bl sys_close
     mov x0, #-1
     str x0, [x19, #DB_BTREE_FD]
@@ -334,8 +381,8 @@ btree_adapter_close:
     str xzr, [x19, #DB_STORAGE_PORT]
 
 .Lac_done:
-    mov x0, #ADB_OK
-    ldr x19, [sp, #16]
+    mov w0, w20                    // return sync error (0=ok)
+    ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #32
     ret
 .size btree_adapter_close, .-btree_adapter_close

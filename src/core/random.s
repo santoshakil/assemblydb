@@ -68,7 +68,7 @@ random_level:
     // Each 2 bits: if (bits & 3) == 0, go up (probability 1/4)
 .Lrl_loop:
     cmp w1, #MAX_SKIP_HEIGHT
-    b.ge .Lrl_done
+    b.hs .Lrl_done
     tst x0, #3                 // test bottom 2 bits
     b.ne .Lrl_done              // if not zero, stop
     add w1, w1, #1              // level++

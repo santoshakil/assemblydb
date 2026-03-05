@@ -15,6 +15,7 @@ static int tests_passed = 0;
 
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
 #define FAIL(msg) do { printf("FAIL: %s\n", msg); } while(0)
+static void cleanup(const char *cmd) { int rc = system(cmd); (void)rc; }
 
 // ============================================================================
 // LRU Cache Tests
@@ -190,6 +191,85 @@ static void test_lru_multiple_pages(void) {
     else FAIL("multi-page insert/fetch failed");
 }
 
+static void test_lru_evict_refetch_correctness(void) {
+    TEST("LRU cache evict+refetch: hash chain intact");
+    void *cache = lru_cache_create(4);
+    if (!cache) { FAIL("create failed"); return; }
+
+    uint8_t *page = (uint8_t *)page_alloc(1);
+    int ok = 1;
+
+    // Insert 4 pages to fill cache
+    for (int i = 0; i < 4; i++) {
+        memset(page, (uint8_t)(0x10 + i), 4096);
+        void *p = lru_cache_insert(cache, (uint32_t)i, page);
+        if (!p) { ok = 0; break; }
+        lru_cache_unpin(cache, (uint32_t)i);
+    }
+
+    // Insert a 5th, evicting page 0 (LRU head)
+    memset(page, 0x99, 4096);
+    void *p = lru_cache_insert(cache, 100, page);
+    if (!p) ok = 0;
+    else lru_cache_unpin(cache, 100);
+
+    // Page 0 should be gone
+    void *f = lru_cache_fetch(cache, 0);
+    if (f != NULL) { ok = 0; lru_cache_unpin(cache, 0); }
+
+    // Pages 1, 2, 3 should still be reachable (backward-shift test)
+    for (int i = 1; i <= 3 && ok; i++) {
+        f = lru_cache_fetch(cache, (uint32_t)i);
+        if (!f) { ok = 0; break; }
+        uint8_t *d = (uint8_t *)f;
+        if (d[0] != (uint8_t)(0x10 + i)) ok = 0;
+        lru_cache_unpin(cache, (uint32_t)i);
+    }
+
+    // Page 100 should be fetchable
+    f = lru_cache_fetch(cache, 100);
+    if (!f) ok = 0;
+    else {
+        if (((uint8_t *)f)[0] != 0x99) ok = 0;
+        lru_cache_unpin(cache, 100);
+    }
+
+    page_free(page, 1);
+    lru_cache_destroy(cache);
+    if (ok) PASS();
+    else FAIL("evict broke hash chain for remaining pages");
+}
+
+static void test_lru_evict_cycle_stress(void) {
+    TEST("LRU cache: 200 insert/evict cycles, all correct");
+    void *cache = lru_cache_create(8);
+    if (!cache) { FAIL("create failed"); return; }
+
+    uint8_t *page = (uint8_t *)page_alloc(1);
+    int ok = 1;
+
+    // Insert 200 pages into 8-slot cache, verify each new one is fetchable
+    for (int i = 0; i < 200 && ok; i++) {
+        memset(page, (uint8_t)(i & 0xFF), 4096);
+        void *p = lru_cache_insert(cache, (uint32_t)i, page);
+        if (!p) { ok = 0; break; }
+        lru_cache_unpin(cache, (uint32_t)i);
+
+        // Verify the most recent 8 pages are all fetchable
+        int start = (i >= 7) ? i - 7 : 0;
+        for (int j = start; j <= i && ok; j++) {
+            void *f = lru_cache_fetch(cache, (uint32_t)j);
+            if (!f) { ok = 0; break; }
+            lru_cache_unpin(cache, (uint32_t)j);
+        }
+    }
+
+    page_free(page, 1);
+    lru_cache_destroy(cache);
+    if (ok) PASS();
+    else FAIL("evict cycle corrupted cache");
+}
+
 // ============================================================================
 // Index Filename Test
 // ============================================================================
@@ -263,7 +343,7 @@ static void test_api_full_lifecycle(void) {
     TEST("full API: open -> put -> get -> delete -> close");
 
     // Clean up any previous test
-    system("rm -rf /tmp/test_adb_integ");
+    cleanup("rm -rf /tmp/test_adb_integ");
 
     adb_t *db = NULL;
     int rc = adb_open("/tmp/test_adb_integ", NULL, &db);
@@ -297,14 +377,14 @@ static void test_api_full_lifecycle(void) {
     }
 
     adb_close(db);
-    system("rm -rf /tmp/test_adb_integ");
+    cleanup("rm -rf /tmp/test_adb_integ");
     PASS();
 }
 
 static void test_api_multiple_keys(void) {
     TEST("full API: insert and retrieve 100 keys");
 
-    system("rm -rf /tmp/test_adb_multi");
+    cleanup("rm -rf /tmp/test_adb_multi");
 
     adb_t *db = NULL;
     int rc = adb_open("/tmp/test_adb_multi", NULL, &db);
@@ -334,7 +414,7 @@ static void test_api_multiple_keys(void) {
     }
 
     adb_close(db);
-    system("rm -rf /tmp/test_adb_multi");
+    cleanup("rm -rf /tmp/test_adb_multi");
 
     if (ok) PASS();
     else FAIL("multi-key insert/retrieve failed");
@@ -343,7 +423,7 @@ static void test_api_multiple_keys(void) {
 static void test_api_transactions(void) {
     TEST("full API: transaction begin/commit");
 
-    system("rm -rf /tmp/test_adb_tx");
+    cleanup("rm -rf /tmp/test_adb_tx");
 
     adb_t *db = NULL;
     int rc = adb_open("/tmp/test_adb_tx", NULL, &db);
@@ -357,7 +437,7 @@ static void test_api_transactions(void) {
     if (rc != 0) { FAIL("tx_commit failed"); adb_close(db); return; }
 
     adb_close(db);
-    system("rm -rf /tmp/test_adb_tx");
+    cleanup("rm -rf /tmp/test_adb_tx");
     PASS();
 }
 
@@ -366,26 +446,46 @@ static void test_api_transactions(void) {
 // ============================================================================
 
 static void test_backup_full(void) {
-    TEST("full backup creates destination directory");
-
-    system("rm -rf /tmp/test_adb_bkup_src /tmp/test_adb_bkup_dst");
+    TEST("full backup+restore preserves data");
+    cleanup("rm -rf /tmp/test_adb_bkup_src /tmp/test_adb_bkup_dst /tmp/test_adb_bkup_restored");
 
     adb_t *db = NULL;
     int rc = adb_open("/tmp/test_adb_bkup_src", NULL, &db);
     if (rc != 0 || !db) { FAIL("open failed"); return; }
 
-    // Insert some data
-    adb_put(db, "bktest", 6, "data123", 7);
-
-    rc = backup_full(db, "/tmp/test_adb_bkup_dst");
+    int errors = 0;
+    char key[32], val[32], vbuf[64];
+    uint16_t vlen = 0;
+    for (int i = 0; i < 512; i++) {
+        int kl = snprintf(key, sizeof(key), "bk_%04d", i);
+        int vl = snprintf(val, sizeof(val), "payload_%04d", i);
+        if (adb_put(db, key, (uint16_t)kl, val, (uint16_t)vl) != 0) errors++;
+    }
+    if (adb_sync(db) != 0) errors++;
+    if (adb_backup(db, "/tmp/test_adb_bkup_dst", ADB_BACKUP_FULL) != 0) errors++;
 
     adb_close(db);
-    system("rm -rf /tmp/test_adb_bkup_src /tmp/test_adb_bkup_dst");
 
-    if (rc == 0) PASS();
-    else {
-        printf("FAIL: backup_full returned %d\n", rc);
+    db = NULL;
+    rc = adb_restore("/tmp/test_adb_bkup_dst", "/tmp/test_adb_bkup_restored");
+    if (rc != 0 || adb_open("/tmp/test_adb_bkup_restored", NULL, &db) != 0 || !db) {
+        cleanup("rm -rf /tmp/test_adb_bkup_src /tmp/test_adb_bkup_dst /tmp/test_adb_bkup_restored");
+        FAIL("restore/open failed");
+        return;
     }
+
+    for (int i = 0; i < 512; i++) {
+        int kl = snprintf(key, sizeof(key), "bk_%04d", i);
+        int vl = snprintf(val, sizeof(val), "payload_%04d", i);
+        rc = adb_get(db, key, (uint16_t)kl, vbuf, sizeof(vbuf), &vlen);
+        if (rc != 0 || vlen != (uint16_t)vl || memcmp(vbuf, val, vl) != 0) errors++;
+    }
+
+    adb_close(db);
+    cleanup("rm -rf /tmp/test_adb_bkup_src /tmp/test_adb_bkup_dst /tmp/test_adb_bkup_restored");
+
+    if (errors == 0) PASS();
+    else FAIL("backup/restore mismatch");
 }
 
 // ============================================================================
@@ -431,6 +531,8 @@ int main(void) {
     test_lru_eviction();
     test_lru_dirty_flag();
     test_lru_multiple_pages();
+    test_lru_evict_refetch_correctness();
+    test_lru_evict_cycle_stress();
 
     // Index
     test_index_filename();

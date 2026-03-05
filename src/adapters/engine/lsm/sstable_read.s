@@ -33,11 +33,14 @@ sstable_open:
     bl build_sst_name
 
     // Open file
+.Lso_open_retry:
     ldr w0, [x19, #DB_DIR_FD]
     mov x1, sp
     mov w2, #O_RDONLY
     mov w3, #0
     bl sys_openat
+    cmn x0, #4
+    b.eq .Lso_open_retry
     add sp, sp, #128
 
     cmp x0, #0
@@ -50,23 +53,49 @@ sstable_open:
     mov x1, #0
     mov w2, #2                     // SEEK_END
     bl sys_lseek
+    cmp x0, #0
+    b.lt .Lso_read_fail_close      // lseek failed
+    cmp x0, #SSTF_SIZE
+    b.lo .Lso_read_fail_close      // file too small for footer
     str x0, [x22, #SSTD_FILE_SIZE]
 
     // Read footer (last SSTF_SIZE bytes)
     sub sp, sp, #SSTF_SIZE
-    sub x1, x0, #SSTF_SIZE        // offset = file_size - SSTF_SIZE
     mov x0, x23
-    mov x2, sp                     // buffer (wrong arg order, fix)
     // pread64(fd, buf, count, offset)
+    // Read footer (with EINTR retry)
+.Lso_pread_retry:
     mov x0, x23                    // fd
     mov x1, sp                     // buf
     mov x2, #SSTF_SIZE             // count
     ldr x3, [x22, #SSTD_FILE_SIZE]
     sub x3, x3, #SSTF_SIZE        // offset
     bl sys_pread64
+    cmn x0, #4                    // EINTR?
+    b.eq .Lso_pread_retry
 
     cmp x0, #SSTF_SIZE
     b.ne .Lso_read_fail
+
+    // Validate magic number
+    ldr x20, [sp, #SSTF_MAGIC]
+    movz x21, #0x3031
+    movk x21, #0x4442, lsl #16
+    movk x21, #0x534D, lsl #32
+    movk x21, #0x4153, lsl #48
+    cmp x20, x21
+    b.ne .Lso_corrupt
+
+    // Validate footer CRC (skip if CRC=0 for backward compat with old files)
+    ldr w20, [sp, #SSTF_CRC32]
+    cbz w20, .Lso_skip_crc
+    str wzr, [sp, #SSTF_CRC32]
+    mov x0, sp
+    mov x1, #SSTF_SIZE
+    bl hw_crc32c
+    cmp w0, w20
+    b.ne .Lso_corrupt
+.Lso_skip_crc:
 
     // Parse footer into descriptor
     ldr w0, [sp, #SSTF_NUM_DATA_BLK]
@@ -75,16 +104,32 @@ sstable_open:
     str w0, [x22, #SSTD_NUM_INDEX_BLOCKS]
     ldr x0, [sp, #SSTF_IDX_START]
     str x0, [x22, #SSTD_INDEX_OFFSET]
-    ldr x0, [sp, #SSTF_NUM_ENTRIES]
-    str x0, [x22, #SSTD_NUM_ENTRIES]
+    ldr w0, [sp, #SSTF_NUM_ENTRIES]
+    str w0, [x22, #SSTD_NUM_ENTRIES]
+
+    // Validate num_data_blocks fits within file
+    ldr w0, [x22, #SSTD_NUM_DATA_BLOCKS]
+    ldr x1, [x22, #SSTD_FILE_SIZE]
+    sub x1, x1, #SSTF_SIZE        // data portion = file_size - footer
+    lsr x1, x1, #12               // max_blocks = data_portion / 4096
+    cmp x0, x1
+    b.hi .Lso_corrupt
 
     add sp, sp, #SSTF_SIZE
 
     mov x0, #0
     b .Lso_ret
 
+.Lso_corrupt:
+    add sp, sp, #SSTF_SIZE
+    mov x0, x23
+    bl sys_close
+    mov x0, #ADB_ERR_CORRUPT
+    b .Lso_ret
+
 .Lso_read_fail:
     add sp, sp, #SSTF_SIZE
+.Lso_read_fail_close:
     mov x0, x23
     bl sys_close
     mov x0, #ADB_ERR_IO
@@ -130,24 +175,42 @@ sstable_get:
 
 .Lsg_block_loop:
     cmp w24, w22
-    b.ge .Lsg_not_found
+    b.hs .Lsg_not_found            // unsigned compare (block indices are unsigned)
 
-    // Read block
+    // Read block (with EINTR retry)
+.Lsg_pread_retry:
     mov x0, x23                    // fd
     mov x1, sp                     // buf
     mov x2, #4096                  // count
     lsl x3, x24, #12              // offset = block_idx * 4096
     bl sys_pread64
+    cmn x0, #4                    // EINTR?
+    b.eq .Lsg_pread_retry
     cmp x0, #4096
     b.ne .Lsg_io_error
 
+    // Verify block CRC32 (full-block CRC with CRC field zeroed)
+    ldr w25, [sp, #4]             // saved CRC
+    cbz w25, .Lsg_skip_crc        // CRC=0 means no CRC (backward compat)
+    str wzr, [sp, #4]             // zero CRC slot before computing
+    mov x0, sp
+    mov x1, #4096
+    bl hw_crc32c
+    cmp w0, w25
+    b.ne .Lsg_corrupt
+.Lsg_skip_crc:
+
     // Search within block
     ldrh w25, [sp]                 // num_entries in block
+    cmp w25, #SST_ENTRIES_PER_BLOCK
+    b.ls .Lsg_entries_ok
+    mov w25, #SST_ENTRIES_PER_BLOCK // clamp to max (prevents stack overread)
+.Lsg_entries_ok:
     mov w0, #0                      // entry_idx
 
 .Lsg_entry_loop:
     cmp w0, w25
-    b.ge .Lsg_next_block
+    b.hs .Lsg_next_block           // unsigned compare
 
     // Entry offset = SST_BLOCK_HEADER + entry_idx * 320
     mov w1, #320
@@ -187,6 +250,11 @@ sstable_get:
     mov x0, #ADB_ERR_NOT_FOUND
     b .Lsg_ret
 
+.Lsg_corrupt:
+    add sp, sp, #4096
+    mov x0, #ADB_ERR_CORRUPT
+    b .Lsg_ret
+
 .Lsg_io_error:
     add sp, sp, #4096
     mov x0, #ADB_ERR_IO
@@ -208,16 +276,23 @@ sstable_get:
 .global sstable_close
 .type sstable_close, %function
 sstable_close:
-    stp x29, x30, [sp, #-16]!
+    stp x29, x30, [sp, #-32]!
     mov x29, sp
+    str x19, [sp, #16]
 
-    ldr x0, [x0, #SSTD_FD]
+    mov x19, x0                    // save desc_ptr
+    ldr x0, [x19, #SSTD_FD]
     cmp x0, #0
-    b.le .Lsc_done
+    b.lt .Lsc_done
     bl sys_close
+    movn x0, #0                    // -1
+    str x0, [x19, #SSTD_FD]       // invalidate fd
 
 .Lsc_done:
     mov x0, #0
-    ldp x29, x30, [sp], #16
+    ldr x19, [sp, #16]
+    ldp x29, x30, [sp], #32
     ret
 .size sstable_close, .-sstable_close
+
+.hidden hw_crc32c

@@ -23,8 +23,10 @@ btree_page_init_internal:
     str w2, [x0, #PH_PARENT_PAGE]
     str wzr, [x0, #PH_CRC32]
     str xzr, [x0, #PH_LSN]
-    str xzr, [x0, #PH_NEXT_PAGE]
-    str xzr, [x0, #PH_PREV_PAGE]
+    mvn w2, wzr
+    str w2, [x0, #PH_NEXT_PAGE]
+    mvn w2, wzr
+    str w2, [x0, #PH_PREV_PAGE]
     ret
 .size btree_page_init_internal, .-btree_page_init_internal
 
@@ -188,15 +190,15 @@ btree_page_is_leaf:
 btree_page_compute_crc:
     stp x29, x30, [sp, #-32]!
     mov x29, sp
-    str x19, [sp, #16]
+    stp x19, x20, [sp, #16]
 
     mov x19, x0
 
-    // CRC = crc32c(page[0..PH_CRC32]) ^ crc32c(page[PH_CRC32+4..4096])
+    // CRC = crc32c_combine(page[PH_CRC32+4..4096], seed=crc32c(page[0..PH_CRC32]))
     // Part 1: bytes 0..12 (before CRC field)
     mov x1, #PH_CRC32
     bl hw_crc32c
-    mov w1, w0              // partial CRC
+    mov w20, w0             // save partial CRC in callee-saved w20
 
     // Part 2: bytes 16..4096 (after CRC field)
     add x0, x19, #PH_CRC32
@@ -204,12 +206,11 @@ btree_page_compute_crc:
     mov x1, #PAGE_SIZE
     sub x1, x1, #PH_CRC32
     sub x1, x1, #4
-    // Use hw_crc32c_combine to chain with partial CRC
-    // w1 already has partial CRC, but hw_crc32c_combine expects w2 as init
-    mov w2, w1
+    // Un-finalize Part 1 CRC before chaining (hw_crc32c returns finalized)
+    mvn w2, w20
     bl hw_crc32c_combine
 
-    ldr x19, [sp, #16]
+    ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #32
     ret
 .size btree_page_compute_crc, .-btree_page_compute_crc
@@ -382,7 +383,6 @@ btree_leaf_shift_left:
     mov w22, w20            // i = from_idx
 
 .Llsl_key_loop:
-    cmp w22, w20
     add w23, w20, w21
     cmp w22, w23
     b.ge .Llsl_vals_init
@@ -519,74 +519,6 @@ btree_int_shift_keys_right:
     ldp x29, x30, [sp], #64
     ret
 .size btree_int_shift_keys_right, .-btree_int_shift_keys_right
-
-// ============================================================================
-// btree_int_shift_keys_left(page_ptr, from_idx, count)
-// Shift keys and children left in internal node
-// x0 = page_ptr, w1 = from_idx, w2 = count
-// ============================================================================
-.global btree_int_shift_keys_left
-.type btree_int_shift_keys_left, %function
-btree_int_shift_keys_left:
-    stp x29, x30, [sp, #-64]!
-    mov x29, sp
-    stp x19, x20, [sp, #16]
-    stp x21, x22, [sp, #32]
-    str x23, [sp, #48]
-
-    mov x19, x0
-    mov w20, w1
-    mov w21, w2
-
-    cbz w21, .Lisl_done
-
-    mov w22, w20
-
-.Lisl_key_loop:
-    add w23, w20, w21
-    cmp w22, w23
-    b.ge .Lisl_children
-
-    add w1, w22, #1
-    mov x0, x19
-    bl btree_page_get_key_ptr
-    mov x23, x0
-
-    mov x0, x19
-    mov w1, w22
-    bl btree_page_get_key_ptr
-    // Copy key[i+1] -> key[i]
-    mov x1, x23
-    bl neon_copy_64
-
-    add w22, w22, #1
-    b .Lisl_key_loop
-
-.Lisl_children:
-    // Also shift children[from+1..from+count+1] left
-    add w22, w20, #1  // children start one ahead
-
-.Lisl_child_loop:
-    add w23, w20, w21
-    add w23, w23, #1
-    cmp w22, w23
-    b.ge .Lisl_done
-
-    add x0, x19, #BTREE_INT_CHILDREN_OFF
-    ldr x1, [x0, w22, uxtw #3]
-    sub w23, w22, #1
-    str x1, [x0, w23, uxtw #3]
-
-    add w22, w22, #1
-    b .Lisl_child_loop
-
-.Lisl_done:
-    ldr x23, [sp, #48]
-    ldp x21, x22, [sp, #32]
-    ldp x19, x20, [sp, #16]
-    ldp x29, x30, [sp], #64
-    ret
-.size btree_int_shift_keys_left, .-btree_int_shift_keys_left
 
 // ============================================================================
 // btree_page_get_ptr(mmap_base, page_id) -> page_ptr

@@ -35,12 +35,14 @@ sstable_flush:
     bl build_sst_name
 
     // Open file for writing
+.Lsf_open_retry:
     ldr w0, [x19, #DB_DIR_FD]
     mov x1, sp
     mov w2, #(O_WRONLY | O_CREAT | O_TRUNC)
     mov w3, #0644
-    movk w3, #0, lsl #16
     bl sys_openat
+    cmn x0, #4
+    b.eq .Lsf_open_retry
     add sp, sp, #128
 
     cmp x0, #0
@@ -49,7 +51,6 @@ sstable_flush:
 
     // Create bloom filter for the entries
     ldr x0, [x20, #SLH_ENTRY_COUNT]
-    mov x1, #BLOOM_BITS_PER_KEY
     bl bloom_create
     mov x24, x0                    // bloom_ptr (can be NULL if alloc fails)
 
@@ -81,19 +82,17 @@ sstable_flush:
 .Lsf_entry_loop:
     cbz x25, .Lsf_write_block
     cmp w0, #SST_ENTRIES_PER_BLOCK
-    b.ge .Lsf_write_block
+    b.hs .Lsf_write_block
 
     // Skip deleted entries
     ldrb w2, [x25, #SLN_IS_DELETED]
     cbnz w2, .Lsf_skip_entry
 
-    // Add key to bloom filter
+    // Add key to bloom filter (key record at node offset 0 = 64-byte fixed key)
     cbz x24, .Lsf_skip_bloom
     stp x0, x1, [sp, #-16]!
-    mov x0, x24
-    mov x1, x25                    // key_ptr (node starts with key)
-    ldrh w2, [x25, #SLN_KEY_LEN]
-    add x1, x25, #SLN_KEY_DATA
+    mov x0, x24                    // bloom
+    mov x1, x25                    // key_ptr = node base (64B key record)
     bl bloom_add
     ldp x0, x1, [sp], #16
 
@@ -129,24 +128,21 @@ sstable_flush:
     strh w0, [sp]                  // num_entries
     strh wzr, [sp, #2]            // padding
 
-    // CRC32 of block data
-    add x1, sp, #SST_BLOCK_HEADER
-    mov w2, w0
-    mov x3, #320                   // entry size
-    mul x1, x3, x2                 // Not right - just CRC the whole block
-    // Actually CRC the full block minus header CRC field
+    // CRC32 of entire block (CRC field zeroed before compute)
+    str wzr, [sp, #4]
     mov x0, sp
-    add x0, x0, #4                // skip num_entries and pad, start after CRC slot
-    mov x1, #(4096 - 4)
-    mov w2, #0
+    mov x1, #4096
     bl hw_crc32c
     str w0, [sp, #4]              // store CRC
 
-    // Write block to file
+    // Write block to file (with EINTR retry)
+.Lsf_wr_retry:
     mov x0, x23                    // fd
     mov x1, sp                     // buffer
     mov x2, #4096
     bl sys_write
+    cmn x0, #4                    // EINTR?
+    b.eq .Lsf_wr_retry
     cmp x0, #4096
     b.ne .Lsf_io_error
 
@@ -155,8 +151,35 @@ sstable_flush:
     b .Lsf_block_loop
 
 .Lsf_blocks_done:
+    // Free block buffer
+    add sp, sp, #4096
+
+    // If zero entries written (all tombstones), skip writing SSTable
+    cbnz x26, .Lsf_write_footer
+    // Close and unlink the empty file
+    mov x0, x23
+    bl sys_close
+    // Unlink the empty SST file
+    sub sp, sp, #128
+    mov x0, sp
+    mov w1, w21
+    mov w2, w22
+    bl build_sst_name
+    ldr w0, [x19, #DB_DIR_FD]
+    mov x1, sp
+    mov w2, #0
+    bl sys_unlinkat
+    add sp, sp, #128
+    // Destroy bloom
+    cbz x24, .Lsf_empty_ok
+    mov x0, x24
+    bl bloom_destroy
+.Lsf_empty_ok:
+    mov x0, #0
+    b .Lsf_ret
+
+.Lsf_write_footer:
     // Write footer (256 bytes, padded to fit)
-    add sp, sp, #4096              // free block buffer
 
     sub sp, sp, #SSTF_SIZE         // footer buffer
     mov x0, sp
@@ -174,20 +197,36 @@ sstable_flush:
     str wzr, [sp, #SSTF_NUM_IDX_BLK]
     str x28, [sp, #SSTF_IDX_START]    // index starts right after data
     str xzr, [sp, #SSTF_BLOOM_START]
-    str xzr, [sp, #SSTF_BLOOM_SIZE]
-    str x26, [sp, #SSTF_NUM_ENTRIES]
+    str wzr, [sp, #SSTF_BLOOM_SIZE]
+    str w26, [sp, #SSTF_NUM_ENTRIES]
 
-    // Write footer
+    // Compute footer CRC (CRC field is zero from memzero)
+    mov x0, sp
+    mov x1, #SSTF_SIZE
+    bl hw_crc32c
+    str w0, [sp, #SSTF_CRC32]
+
+    // Write footer (with EINTR retry)
+.Lsf_ftr_retry:
     mov x0, x23
     mov x1, sp
     mov x2, #SSTF_SIZE
     bl sys_write
+    cmn x0, #4                    // EINTR?
+    b.eq .Lsf_ftr_retry
+    cmp x0, #SSTF_SIZE
+    b.ne .Lsf_footer_err
 
     add sp, sp, #SSTF_SIZE
 
     // Sync and close
+.Lsf_sync_retry:
     mov x0, x23
     bl sys_fdatasync
+    cmn x0, #4
+    b.eq .Lsf_sync_retry
+    cmp x0, #0
+    b.lt .Lsf_err_close_unlink
     mov x0, x23
     bl sys_close
 
@@ -197,35 +236,97 @@ sstable_flush:
     bl bloom_destroy
 .Lsf_no_bloom:
 
-    // Register SSTable in db state
+    // Register SSTable descriptor in db state
     cmp w21, #0
-    b.ne .Lsf_l1
+    b.ne .Lsf_reg_l1
 
-    // L0
-    ldr w0, [x19, #DB_SST_COUNT_L0]
-    cmp w0, #MAX_SST_PER_LEVEL
-    b.ge .Lsf_ok                   // table full, skip registration
+    // Register L0 descriptor
+    ldr w25, [x19, #DB_SST_COUNT_L0]
+    cmp w25, #MAX_SST_PER_LEVEL
+    b.hs .Lsf_reg_full
+    mov x0, #SSTD_SIZE
+    bl alloc_zeroed
+    cbz x0, .Lsf_reg_nomem
+    mov x28, x0                    // descriptor
+    mov x0, x19
+    mov w1, w21
+    mov w2, w22
+    mov x3, x28
+    bl sstable_open
+    cbnz x0, .Lsf_reg_open_fail
     add x1, x19, #DB_SST_LIST_L0
-    str xzr, [x1, w0, uxtw #3]   // placeholder (descriptor would go here)
-    add w0, w0, #1
-    str w0, [x19, #DB_SST_COUNT_L0]
+    str x28, [x1, w25, uxtw #3]
+    add w25, w25, #1
+    str w25, [x19, #DB_SST_COUNT_L0]
     b .Lsf_ok
 
-.Lsf_l1:
-    ldr w0, [x19, #DB_SST_COUNT_L1]
-    cmp w0, #MAX_SST_PER_LEVEL
-    b.ge .Lsf_ok
+.Lsf_reg_l1:
+    // Register L1 descriptor
+    ldr w25, [x19, #DB_SST_COUNT_L1]
+    cmp w25, #MAX_SST_PER_LEVEL
+    b.hs .Lsf_reg_full
+    mov x0, #SSTD_SIZE
+    bl alloc_zeroed
+    cbz x0, .Lsf_reg_nomem
+    mov x28, x0                    // descriptor
+    mov x0, x19
+    mov w1, w21
+    mov w2, w22
+    mov x3, x28
+    bl sstable_open
+    cbnz x0, .Lsf_reg_open_fail
     add x1, x19, #DB_SST_LIST_L1
-    str xzr, [x1, w0, uxtw #3]
-    add w0, w0, #1
-    str w0, [x19, #DB_SST_COUNT_L1]
+    str x28, [x1, w25, uxtw #3]
+    add w25, w25, #1
+    str w25, [x19, #DB_SST_COUNT_L1]
+    b .Lsf_ok
+
+.Lsf_reg_open_fail:
+    mov x27, x0
+    mov x0, x28
+    mov x1, #SSTD_SIZE
+    bl free_mem
+    mov x0, x27
+    b .Lsf_ret
+
+.Lsf_reg_nomem:
+    mov x0, #ADB_ERR_NOMEM
+    b .Lsf_ret
+
+.Lsf_reg_full:
+    mov x0, #ADB_ERR_FULL
+    b .Lsf_ret
 
 .Lsf_ok:
     mov x0, #0
     b .Lsf_ret
 
+.Lsf_footer_err:
+    add sp, sp, #SSTF_SIZE         // clean up footer buffer
+    b .Lsf_err_close_unlink
+
 .Lsf_io_error:
-    add sp, sp, #4096              // clean up block buffer if still allocated
+    add sp, sp, #4096              // clean up block buffer
+    // fall through
+
+.Lsf_err_close_unlink:
+    mov x0, x23
+    bl sys_close
+    // Unlink partial SSTable to prevent corrupt leftover on disk
+    sub sp, sp, #128
+    mov x0, sp
+    mov w1, w21                     // level
+    mov w2, w22                     // seq
+    bl build_sst_name
+    ldr w0, [x19, #DB_DIR_FD]
+    mov x1, sp
+    mov w2, #0
+    bl sys_unlinkat
+    add sp, sp, #128
+    cbz x24, .Lsf_err_nobloom
+    mov x0, x24
+    bl bloom_destroy
+.Lsf_err_nobloom:
     mov x0, #ADB_ERR_IO
     b .Lsf_ret
 
@@ -241,3 +342,9 @@ sstable_flush:
     ldp x29, x30, [sp], #112
     ret
 .size sstable_flush, .-sstable_flush
+
+.hidden alloc_zeroed
+.hidden free_mem
+.hidden sstable_open
+.hidden sys_unlinkat
+.hidden hw_crc32c

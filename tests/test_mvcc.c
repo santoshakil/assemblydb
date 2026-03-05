@@ -149,7 +149,8 @@ static void test_rwlock_multiple_readers(void) {
     rwlock_rdlock(&rwlock);
     rwlock_rdlock(&rwlock);
 
-    uint32_t state = *(uint32_t *)&rwlock;
+    uint32_t state = 0;
+    memcpy(&state, &rwlock, sizeof(state));
     if (state != 3) {
         char msg[64];
         snprintf(msg, sizeof(msg), "state=%u expected 3", state);
@@ -164,7 +165,7 @@ static void test_rwlock_multiple_readers(void) {
     rwlock_rdunlock(&rwlock);
     rwlock_rdunlock(&rwlock);
 
-    state = *(uint32_t *)&rwlock;
+    memcpy(&state, &rwlock, sizeof(state));
     if (state != 0) { FAIL("rwlock not free after all unlocks"); return; }
 
     PASS();
