@@ -1022,7 +1022,6 @@ backup_validate_manifest:
 .hidden free_mem
 .hidden neon_memzero
 .hidden hw_crc32c
-.hidden adb_sync
 .hidden sys_openat
 .hidden sys_read
 .hidden sys_close
