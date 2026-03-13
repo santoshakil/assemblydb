@@ -12,8 +12,8 @@ import 'metrics.dart';
 import 'scan_entry.dart';
 import 'transaction.dart';
 
-const _maxKeyLen = 62;
-const _maxValLen = 254;
+const maxKeyLength = 62;
+const maxValueLength = 254;
 
 class AssemblyDB {
   AssemblyDB._(this._bindings, this._db);
@@ -356,12 +356,12 @@ class AssemblyDB {
   }
 
   static void _validateKey(Uint8List key) {
-    if (key.length > _maxKeyLen) throw const KeyTooLongError();
+    if (key.length > maxKeyLength) throw const KeyTooLongError();
   }
 
   static void _validateKV(Uint8List key, Uint8List value) {
-    if (key.length > _maxKeyLen) throw const KeyTooLongError();
-    if (value.length > _maxValLen) throw const ValTooLongError();
+    if (key.length > maxKeyLength) throw const KeyTooLongError();
+    if (value.length > maxValueLength) throw const ValTooLongError();
   }
 }
 
