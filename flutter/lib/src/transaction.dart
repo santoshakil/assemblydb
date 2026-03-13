@@ -10,17 +10,20 @@ import 'errors.dart';
 import 'scan_entry.dart';
 
 class Transaction {
-  Transaction.fromNative(this._bindings, this._db, this._txId);
+  Transaction.fromNative(this._bindings, this._db, this._txId, this._isDbOpen);
 
   final AssemblyDBBindings _bindings;
   final Pointer<adb_t> _db;
   final int _txId;
+  final bool Function() _isDbOpen;
   bool _active = true;
 
   bool get isActive => _active;
 
   void put(Uint8List key, Uint8List value) {
     _checkActive();
+    if (key.length > 62) throw const KeyTooLongError();
+    if (value.length > 254) throw const ValTooLongError();
     using((arena) {
       final kp = allocNative(arena, key);
       final vp = allocNative(arena, value);
@@ -34,6 +37,7 @@ class Transaction {
 
   Uint8List? get(Uint8List key) {
     _checkActive();
+    if (key.length > 62) throw const KeyTooLongError();
     return using((arena) {
       final kp = allocNative(arena, key);
       final vbuf = arena<Uint8>(256);
@@ -53,6 +57,7 @@ class Transaction {
 
   void delete(Uint8List key) {
     _checkActive();
+    if (key.length > 62) throw const KeyTooLongError();
     using((arena) {
       final kp = allocNative(arena, key);
       final err = _bindings.adb_tx_delete(_db, _txId, kp.cast(), key.length);
@@ -104,6 +109,7 @@ class Transaction {
   }
 
   void _checkActive() {
+    if (!_isDbOpen()) throw StateError('Database is closed');
     if (!_active) throw StateError('Transaction is no longer active');
   }
 }

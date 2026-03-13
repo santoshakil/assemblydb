@@ -2578,4 +2578,709 @@ void main() {
       }
     });
   });
+
+  // ============================================================
+  // HARDENING: tx-after-close, validation, double-failure
+  // ============================================================
+  group('hardening: tx after db close', () {
+    test('tx put after db.close throws StateError', () {
+      final db = AssemblyDB.open(_dbPath);
+      final tx = db.begin();
+      db.close();
+      expect(() => tx.put(_b('k'), _b('v')), throwsStateError);
+    });
+
+    test('tx get after db.close throws StateError', () {
+      final db = AssemblyDB.open(_dbPath);
+      final tx = db.begin();
+      db.close();
+      expect(() => tx.get(_b('k')), throwsStateError);
+    });
+
+    test('tx delete after db.close throws StateError', () {
+      final db = AssemblyDB.open(_dbPath);
+      final tx = db.begin();
+      db.close();
+      expect(() => tx.delete(_b('k')), throwsStateError);
+    });
+
+    test('tx commit after db.close throws StateError', () {
+      final db = AssemblyDB.open(_dbPath);
+      final tx = db.begin();
+      db.close();
+      expect(() => tx.commit(), throwsStateError);
+    });
+
+    test('tx rollback after db.close throws StateError', () {
+      final db = AssemblyDB.open(_dbPath);
+      final tx = db.begin();
+      db.close();
+      expect(() => tx.rollback(), throwsStateError);
+    });
+
+    test('tx scan after db.close throws StateError', () {
+      final db = AssemblyDB.open(_dbPath);
+      final tx = db.begin();
+      db.close();
+      expect(() => tx.scan(onEntry: (_, __) => true), throwsStateError);
+    });
+
+    test('tx scanAll after db.close throws StateError', () {
+      final db = AssemblyDB.open(_dbPath);
+      final tx = db.begin();
+      db.close();
+      expect(() => tx.scanAll(), throwsStateError);
+    });
+  });
+
+  group('hardening: tx validation', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('tx put key too long throws KeyTooLongError', () {
+      final tx = db.begin();
+      expect(
+        () => tx.put(Uint8List(63), _b('v')),
+        throwsA(isA<KeyTooLongError>()),
+      );
+      tx.rollback();
+    });
+
+    test('tx put value too long throws ValTooLongError', () {
+      final tx = db.begin();
+      expect(
+        () => tx.put(_b('k'), Uint8List(255)),
+        throwsA(isA<ValTooLongError>()),
+      );
+      tx.rollback();
+    });
+
+    test('tx get key too long throws KeyTooLongError', () {
+      final tx = db.begin();
+      expect(
+        () => tx.get(Uint8List(63)),
+        throwsA(isA<KeyTooLongError>()),
+      );
+      tx.rollback();
+    });
+
+    test('tx delete key too long throws KeyTooLongError', () {
+      final tx = db.begin();
+      expect(
+        () => tx.delete(Uint8List(63)),
+        throwsA(isA<KeyTooLongError>()),
+      );
+      tx.rollback();
+    });
+
+    test('tx put max key + max value succeeds', () {
+      final tx = db.begin();
+      tx.put(Uint8List(62), Uint8List(254));
+      tx.commit();
+    });
+
+    test('tx remains active after validation error', () {
+      final tx = db.begin();
+      try { tx.put(Uint8List(63), _b('v')); } on KeyTooLongError catch (_) {}
+      expect(tx.isActive, true);
+      tx.putString('valid', 'ok');
+      tx.commit();
+      expect(db.getString('valid'), 'ok');
+    });
+
+    test('tx putString validates utf8 byte length', () {
+      final tx = db.begin();
+      final longKey = String.fromCharCodes(List.filled(63, 0x41));
+      expect(
+        () => tx.putString(longKey, 'v'),
+        throwsA(isA<KeyTooLongError>()),
+      );
+      tx.rollback();
+    });
+  });
+
+  group('hardening: transaction double-failure', () {
+    test('transaction() handles rollback failure gracefully', () {
+      final db = AssemblyDB.open(_dbPath);
+      expect(
+        () => db.transaction((tx) {
+          tx.putString('k', 'v');
+          throw FormatException('forced');
+        }),
+        throwsFormatException,
+      );
+      expect(db.getString('k'), isNull);
+      db.close();
+    });
+
+    test('transaction() propagates original exception not rollback error', () {
+      final db = AssemblyDB.open(_dbPath);
+      Object? caught;
+      try {
+        db.transaction((tx) {
+          tx.putString('before_err', 'val');
+          throw ArgumentError('original');
+        });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught, isA<ArgumentError>());
+      expect((caught as ArgumentError).message, 'original');
+      db.close();
+    });
+  });
+
+  group('hardening: db close during operations', () {
+    test('db usable up until close, then not', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.putString('a', '1');
+      expect(db.getString('a'), '1');
+      db.close();
+      expect(() => db.putString('b', '2'), throwsStateError);
+      expect(() => db.getString('a'), throwsStateError);
+      expect(() => db.sync(), throwsStateError);
+    });
+
+    test('isOpen reflects state', () {
+      final db = AssemblyDB.open(_dbPath);
+      expect(db.isOpen, true);
+      db.close();
+      expect(db.isOpen, false);
+    });
+  });
+
+  // ============================================================
+  // PRODUCTION: realistic multi-step workflows
+  // ============================================================
+  group('production: migration workflow', () {
+    test('read all keys, transform, write back', () {
+      final db = AssemblyDB.open(_dbPath);
+      for (var i = 0; i < 50; i++) {
+        db.putString('old:$i', 'data_$i');
+      }
+      db.sync();
+
+      final entries = <String, String>{};
+      db.scanStrings(
+        start: 'old:',
+        end: 'old:\xff',
+        onEntry: (k, v) { entries[k] = v; return true; },
+      );
+      expect(entries.length, 50);
+
+      for (final e in entries.entries) {
+        final newKey = e.key.replaceFirst('old:', 'new:');
+        db.putString(newKey, '${e.value}_migrated');
+        db.deleteString(e.key);
+      }
+      db.sync();
+
+      expect(db.count(start: _b('old:'), end: _b('old:\xff')), 0);
+      final migrated = <String>[];
+      db.scanStrings(
+        start: 'new:',
+        end: 'new:\xff',
+        onEntry: (k, v) {
+          expect(v, endsWith('_migrated'));
+          migrated.add(k);
+          return true;
+        },
+      );
+      expect(migrated.length, 50);
+      db.close();
+    });
+  });
+
+  group('production: prefix namespacing', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('multiple namespaces coexist', () {
+      for (var i = 0; i < 20; i++) {
+        db.putString('users:$i', 'user_$i');
+        db.putString('orders:$i', 'order_$i');
+        db.putString('config:$i', 'cfg_$i');
+      }
+      db.sync();
+
+      var userCount = 0;
+      db.scanStrings(
+        start: 'users:',
+        end: 'users:\xff',
+        onEntry: (_, __) { userCount++; return true; },
+      );
+      expect(userCount, 20);
+
+      var orderCount = 0;
+      db.scanStrings(
+        start: 'orders:',
+        end: 'orders:\xff',
+        onEntry: (_, __) { orderCount++; return true; },
+      );
+      expect(orderCount, 20);
+
+      db.deleteString('users:5');
+      expect(db.existsString('users:5'), false);
+      expect(db.existsString('orders:5'), true);
+    });
+  });
+
+  group('production: write-heavy then read-heavy', () {
+    test('sequential phases', () {
+      final db = AssemblyDB.open(_dbPath);
+      for (var i = 0; i < 500; i++) {
+        db.putString('wr:${i.toString().padLeft(4, '0')}', 'payload_$i');
+      }
+      db.sync();
+
+      for (var i = 0; i < 500; i++) {
+        final v = db.getString('wr:${i.toString().padLeft(4, '0')}');
+        expect(v, 'payload_$i');
+      }
+
+      final m = db.metrics;
+      expect(m.putsTotal, greaterThanOrEqualTo(500));
+      expect(m.getsTotal, greaterThanOrEqualTo(500));
+      db.close();
+    });
+  });
+
+  group('production: transactional counter', () {
+    late AssemblyDB db;
+    setUp(() {
+      db = AssemblyDB.open(_dbPath);
+      db.putString('counter', '0');
+      db.sync();
+    });
+    tearDown(() => db.close());
+
+    test('increment counter in transactions', () {
+      for (var i = 0; i < 50; i++) {
+        db.transaction((tx) {
+          final cur = int.parse(tx.getString('counter')!);
+          tx.putString('counter', '${cur + 1}');
+        });
+      }
+      expect(db.getString('counter'), '50');
+    });
+
+    test('failed increment does not change counter', () {
+      final before = db.getString('counter');
+      try {
+        db.transaction((tx) {
+          final cur = int.parse(tx.getString('counter')!);
+          tx.putString('counter', '${cur + 1}');
+          throw StateError('abort');
+        });
+      } on StateError catch (_) {}
+      expect(db.getString('counter'), before);
+    });
+  });
+
+  // ============================================================
+  // HARDENING: countStrings, indexScan validation, close-safety
+  // ============================================================
+  group('hardening: countStrings', () {
+    late AssemblyDB db;
+    setUp(() {
+      db = AssemblyDB.open(_dbPath);
+      for (var i = 0; i < 30; i++) {
+        db.putString('ns:${i.toString().padLeft(3, '0')}', 'v$i');
+      }
+      db.sync();
+    });
+    tearDown(() => db.close());
+
+    test('countStrings all', () {
+      expect(db.countStrings(start: 'ns:', end: 'ns:\xff'), 30);
+    });
+
+    test('countStrings subset', () {
+      final c = db.countStrings(start: 'ns:010', end: 'ns:020');
+      expect(c, greaterThan(0));
+      expect(c, lessThanOrEqualTo(11));
+    });
+
+    test('countStrings no match', () {
+      expect(db.countStrings(start: 'zzz:', end: 'zzz:\xff'), 0);
+    });
+  });
+
+  group('hardening: close safety all methods', () {
+    test('backup after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(
+        () => db.backup('${_tmpDir.path}/bak'),
+        throwsStateError,
+      );
+    });
+
+    test('batch after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(
+        () => db.batchPut({_b('k'): _b('v')}),
+        throwsStateError,
+      );
+    });
+
+    test('batchPutStrings after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(
+        () => db.batchPutStrings({'k': 'v'}),
+        throwsStateError,
+      );
+    });
+
+    test('scan after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(
+        () => db.scan(onEntry: (_, __) => true),
+        throwsStateError,
+      );
+    });
+
+    test('scanAll after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db.scanAll(), throwsStateError);
+    });
+
+    test('scanStrings after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(
+        () => db.scanStrings(onEntry: (_, __) => true),
+        throwsStateError,
+      );
+    });
+
+    test('count after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db.count(), throwsStateError);
+    });
+
+    test('countStrings after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db.countStrings(), throwsStateError);
+    });
+
+    test('begin after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db.begin(), throwsStateError);
+    });
+
+    test('createIndex after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db.createIndex('idx'), throwsStateError);
+    });
+
+    test('dropIndex after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db.dropIndex('idx'), throwsStateError);
+    });
+
+    test('metrics after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db.metrics, throwsStateError);
+    });
+
+    test('delete after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db.delete(_b('k')), throwsStateError);
+    });
+
+    test('exists after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db.exists(_b('k')), throwsStateError);
+    });
+
+    test('operator[] after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db[_b('k')], throwsStateError);
+    });
+
+    test('operator[]= after close throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.close();
+      expect(() => db[_b('k')] = _b('v'), throwsStateError);
+    });
+  });
+
+  // ============================================================
+  // STRESS: heavy mixed workloads
+  // ============================================================
+  group('stress: tx-heavy workflow', () {
+    test('200 transactions alternating read-modify-write', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.putString('acc:balance', '1000');
+      db.sync();
+
+      for (var i = 0; i < 200; i++) {
+        db.transaction((tx) {
+          final bal = int.parse(tx.getString('acc:balance')!);
+          tx.putString('acc:balance', '${bal + 1}');
+          tx.putString('acc:log:${i.toString().padLeft(4, '0')}', 'deposit:1');
+        });
+      }
+
+      expect(db.getString('acc:balance'), '1200');
+      final logCount = db.countStrings(start: 'acc:log:', end: 'acc:log:\xff');
+      expect(logCount, 200);
+      db.close();
+    });
+  });
+
+  group('stress: rapid sync cycles', () {
+    test('put-sync 100 times', () {
+      final db = AssemblyDB.open(_dbPath);
+      for (var i = 0; i < 100; i++) {
+        db.putString('s:$i', 'v$i');
+        db.sync();
+      }
+      for (var i = 0; i < 100; i++) {
+        expect(db.getString('s:$i'), 'v$i');
+      }
+      db.close();
+    });
+  });
+
+  group('stress: scan during mutations', () {
+    test('scan then mutate then scan again', () {
+      final db = AssemblyDB.open(_dbPath);
+      for (var i = 0; i < 100; i++) {
+        db.putString('m:${i.toString().padLeft(3, '0')}', 'orig_$i');
+      }
+      db.sync();
+
+      final first = db.scanAll(start: _b('m:'), end: _b('m:\xff'));
+      expect(first.length, 100);
+
+      for (var i = 50; i < 100; i++) {
+        db.deleteString('m:${i.toString().padLeft(3, '0')}');
+      }
+      for (var i = 100; i < 150; i++) {
+        db.putString('m:${i.toString().padLeft(3, '0')}', 'new_$i');
+      }
+      db.sync();
+
+      final second = db.scanAll(start: _b('m:'), end: _b('m:\xff'));
+      expect(second.length, 100);
+      db.close();
+    });
+  });
+
+  group('production: backup-restore-verify cycle', () {
+    test('backup, modify original, restore, verify independence', () {
+      final db = AssemblyDB.open(_dbPath);
+      for (var i = 0; i < 100; i++) {
+        db.putString('bak:$i', 'original_$i');
+      }
+      db.sync();
+
+      final bakPath = '${_tmpDir.path}/backup1';
+      db.backup(bakPath);
+
+      for (var i = 0; i < 50; i++) {
+        db.putString('bak:$i', 'modified_$i');
+      }
+      db.sync();
+      db.close();
+
+      final restorePath = '${_tmpDir.path}/restored';
+      AssemblyDB.restore(bakPath, restorePath);
+      final restored = AssemblyDB.open(restorePath);
+
+      for (var i = 0; i < 100; i++) {
+        expect(restored.getString('bak:$i'), 'original_$i');
+      }
+      restored.close();
+      AssemblyDB.destroy(restorePath);
+    });
+  });
+
+  group('production: batch + tx interleave', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('batch then tx then batch', () {
+      db.batchPutStrings({
+        for (var i = 0; i < 50; i++) 'b1:$i': 'v$i',
+      });
+      db.sync();
+
+      db.transaction((tx) {
+        for (var i = 0; i < 50; i++) {
+          tx.putString('tx:$i', 'tv$i');
+        }
+      });
+
+      db.batchPutStrings({
+        for (var i = 0; i < 50; i++) 'b2:$i': 'v$i',
+      });
+      db.sync();
+
+      expect(db.countStrings(start: 'b1:', end: 'b1:\xff'), 50);
+      expect(db.countStrings(start: 'tx:', end: 'tx:\xff'), 50);
+      expect(db.countStrings(start: 'b2:', end: 'b2:\xff'), 50);
+    });
+  });
+
+  group('adversarial: empty key', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('empty Uint8List key put and get', () {
+      db.put(Uint8List(0), _b('empty_key_val'));
+      final v = db.get(Uint8List(0));
+      expect(v, isNotNull);
+      expect(_s(v!), 'empty_key_val');
+    });
+
+    test('empty string key', () {
+      db.putString('', 'empty_str_val');
+      expect(db.getString(''), 'empty_str_val');
+    });
+
+    test('empty key exists and delete', () {
+      db.putString('', 'val');
+      expect(db.existsString(''), true);
+      db.deleteString('');
+      expect(db.existsString(''), false);
+    });
+  });
+
+  group('adversarial: empty value', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('empty Uint8List value round-trip', () {
+      db.put(_b('ek'), Uint8List(0));
+      final v = db.get(_b('ek'));
+      expect(v, isNotNull);
+      expect(v!.length, 0);
+    });
+
+    test('empty string value round-trip', () {
+      db.putString('ek2', '');
+      expect(db.getString('ek2'), '');
+    });
+  });
+
+  group('adversarial: tx empty key/value', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('tx put empty key', () {
+      final tx = db.begin();
+      tx.put(Uint8List(0), _b('val'));
+      tx.commit();
+      expect(db.getString(''), isNotNull);
+    });
+
+    test('tx put empty value', () {
+      final tx = db.begin();
+      tx.put(_b('k'), Uint8List(0));
+      tx.commit();
+      final v = db.get(_b('k'));
+      expect(v, isNotNull);
+      expect(v!.length, 0);
+    });
+  });
+
+  group('production: kiosk order queue', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('enqueue orders, process, mark done', () {
+      for (var i = 0; i < 20; i++) {
+        final ts = (1000000 + i).toString();
+        db.transaction((tx) {
+          tx.putString('q:pending:$ts', '{"items":[$i]}');
+          tx.putString('q:meta:$ts', 'pending');
+        });
+      }
+
+      final pending = <String, String>{};
+      db.scanStrings(
+        start: 'q:pending:',
+        end: 'q:pending:\xff',
+        onEntry: (k, v) { pending[k] = v; return true; },
+      );
+      expect(pending.length, 20);
+
+      var processed = 0;
+      for (final e in pending.entries) {
+        final ts = e.key.split(':').last;
+        db.transaction((tx) {
+          tx.deleteString(e.key);
+          tx.putString('q:done:$ts', e.value);
+          tx.putString('q:meta:$ts', 'done');
+        });
+        processed++;
+        if (processed >= 10) break;
+      }
+
+      expect(db.countStrings(start: 'q:pending:', end: 'q:pending:\xff'), 10);
+      expect(db.countStrings(start: 'q:done:', end: 'q:done:\xff'), 10);
+    });
+  });
+
+  group('production: config store with defaults', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('get with fallback default', () {
+      String getConfig(String key, String def) => db.getString('cfg:$key') ?? def;
+
+      expect(getConfig('theme', 'dark'), 'dark');
+      db.putString('cfg:theme', 'light');
+      expect(getConfig('theme', 'dark'), 'light');
+
+      db.putString('cfg:lang', 'bn');
+      expect(getConfig('lang', 'en'), 'bn');
+      expect(getConfig('missing', 'fallback'), 'fallback');
+    });
+  });
+
+  group('stress: boundary hammering', () {
+    test('put max-size key+value 100 times', () {
+      final db = AssemblyDB.open(_dbPath);
+      for (var i = 0; i < 100; i++) {
+        final k = Uint8List(62);
+        k[0] = i & 0xFF;
+        k[1] = (i >> 8) & 0xFF;
+        db.put(k, Uint8List(254));
+      }
+      db.sync();
+
+      for (var i = 0; i < 100; i++) {
+        final k = Uint8List(62);
+        k[0] = i & 0xFF;
+        k[1] = (i >> 8) & 0xFF;
+        expect(db.get(k), isNotNull);
+      }
+      db.close();
+    });
+  });
 }

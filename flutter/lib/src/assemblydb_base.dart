@@ -12,6 +12,9 @@ import 'metrics.dart';
 import 'scan_entry.dart';
 import 'transaction.dart';
 
+const _maxKeyLen = 62;
+const _maxValLen = 254;
+
 class AssemblyDB {
   AssemblyDB._(this._bindings, this._db);
 
@@ -70,6 +73,7 @@ class AssemblyDB {
 
   void put(Uint8List key, Uint8List value) {
     _checkOpen();
+    _validateKV(key, value);
     using((arena) {
       final kp = allocNative(arena, key);
       final vp = allocNative(arena, value);
@@ -81,6 +85,7 @@ class AssemblyDB {
 
   Uint8List? get(Uint8List key) {
     _checkOpen();
+    _validateKey(key);
     return using((arena) {
       final kp = allocNative(arena, key);
       final vbuf = arena<Uint8>(256);
@@ -95,6 +100,7 @@ class AssemblyDB {
 
   void delete(Uint8List key) {
     _checkOpen();
+    _validateKey(key);
     using((arena) {
       final kp = allocNative(arena, key);
       final err = _bindings.adb_delete(_db, kp.cast(), key.length);
@@ -104,6 +110,7 @@ class AssemblyDB {
 
   bool exists(Uint8List key) {
     _checkOpen();
+    _validateKey(key);
     return using((arena) {
       final kp = allocNative(arena, key);
       final vbuf = arena<Uint8>(1);
@@ -171,6 +178,9 @@ class AssemblyDB {
   void batchPut(Map<Uint8List, Uint8List> entries) {
     _checkOpen();
     if (entries.isEmpty) return;
+    for (final e in entries.entries) {
+      _validateKV(e.key, e.value);
+    }
     using((arena) {
       final n = entries.length;
       final arr = arena<adb_batch_entry_t>(n);
@@ -200,6 +210,7 @@ class AssemblyDB {
       for (final e in entries.entries) {
         final kb = encodeUtf8(e.key);
         final vb = encodeUtf8(e.value);
+        _validateKV(kb, vb);
         final kp = allocNative(arena, kb);
         final vp = allocNative(arena, vb);
         arr[i]
@@ -220,7 +231,7 @@ class AssemblyDB {
       final txOut = arena<Uint64>();
       final err = _bindings.adb_tx_begin(_db, isolation.value, txOut);
       if (err != ADB_OK) throw AssemblyDBException.fromCode(err);
-      return Transaction.fromNative(_bindings, _db, txOut.value);
+      return Transaction.fromNative(_bindings, _db, txOut.value, () => isOpen);
     });
   }
 
@@ -234,7 +245,9 @@ class AssemblyDB {
       tx.commit();
       return result;
     } catch (_) {
-      if (tx.isActive) tx.rollback();
+      if (tx.isActive) {
+        try { tx.rollback(); } catch (_) {}
+      }
       rethrow;
     }
   }
@@ -257,12 +270,18 @@ class AssemblyDB {
     });
   }
 
+  int countStrings({String? start, String? end}) => count(
+    start: start != null ? encodeUtf8(start) : null,
+    end: end != null ? encodeUtf8(end) : null,
+  );
+
   int indexScan(
     String indexName,
     Uint8List key, {
     required bool Function(Uint8List key, Uint8List value) onEntry,
   }) {
     _checkOpen();
+    _validateKey(key);
     return using((arena) => doScan(
       (cb) {
         final np = indexName.toNativeUtf8(allocator: arena);
@@ -328,6 +347,15 @@ class AssemblyDB {
   void _checkOpen() {
     if (_closed) throw StateError('Database is closed');
   }
+
+  static void _validateKey(Uint8List key) {
+    if (key.length > _maxKeyLen) throw const KeyTooLongError();
+  }
+
+  static void _validateKV(Uint8List key, Uint8List value) {
+    if (key.length > _maxKeyLen) throw const KeyTooLongError();
+    if (value.length > _maxValLen) throw const ValTooLongError();
+  }
 }
 
 Pointer<Uint8> allocNative(Allocator alloc, Uint8List data) {
@@ -379,7 +407,12 @@ int doScan(
 }
 
 Pointer<Void> allocOpt(Allocator alloc, Uint8List? data) {
-  if (data == null || data.isEmpty) return nullptr;
+  if (data == null) return nullptr;
+  if (data.isEmpty) {
+    final p = alloc<Uint8>(1);
+    p.value = 0;
+    return p.cast();
+  }
   final p = alloc<Uint8>(data.length);
   p.asTypedList(data.length).setAll(0, data);
   return p.cast();
