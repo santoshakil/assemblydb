@@ -65,7 +65,23 @@ class Transaction {
     });
   }
 
+  bool exists(Uint8List key) {
+    _checkActive();
+    if (key.length > 62) throw const KeyTooLongError();
+    return using((arena) {
+      final kp = allocNative(arena, key);
+      final vbuf = arena<Uint8>(1);
+      final vlen = arena<Uint16>();
+      final err = _bindings.adb_tx_get(
+          _db, _txId, kp.cast(), key.length, vbuf.cast(), 1, vlen);
+      if (err == ADB_ERR_NOT_FOUND) return false;
+      if (err != ADB_OK) throw AssemblyDBException.fromCode(err);
+      return true;
+    });
+  }
+
   void deleteString(String key) => delete(encodeUtf8(key));
+  bool existsString(String key) => exists(encodeUtf8(key));
 
   int scan({
     Uint8List? start,
@@ -93,6 +109,19 @@ class Transaction {
     });
     return results;
   }
+
+  int scanStrings({
+    String? start,
+    String? end,
+    required bool Function(String key, String value) onEntry,
+  }) => scan(
+    start: start != null ? encodeUtf8(start) : null,
+    end: end != null ? encodeUtf8(end) : null,
+    onEntry: (k, v) => onEntry(utf8.decode(k), utf8.decode(v)),
+  );
+
+  int count({Uint8List? start, Uint8List? end}) =>
+      scan(start: start, end: end, onEntry: (_, __) => true);
 
   void commit() {
     _checkActive();

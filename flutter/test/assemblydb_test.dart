@@ -3283,4 +3283,196 @@ void main() {
       db.close();
     });
   });
+
+  // ============================================================
+  // NEW METHODS: tx exists, tx scanStrings, tx count, scanAllStrings
+  // ============================================================
+  group('hardening: tx exists', () {
+    late AssemblyDB db;
+    setUp(() {
+      db = AssemblyDB.open(_dbPath);
+      db.putString('pre', 'val');
+      db.sync();
+    });
+    tearDown(() => db.close());
+
+    test('tx exists for pre-existing key', () {
+      final tx = db.begin();
+      expect(tx.exists(_b('pre')), true);
+      expect(tx.exists(_b('nope')), false);
+      tx.rollback();
+    });
+
+    test('tx exists for own writes', () {
+      final tx = db.begin();
+      tx.put(_b('new'), _b('v'));
+      expect(tx.exists(_b('new')), true);
+      tx.rollback();
+    });
+
+    test('tx existsString', () {
+      final tx = db.begin();
+      expect(tx.existsString('pre'), true);
+      expect(tx.existsString('missing'), false);
+      tx.rollback();
+    });
+
+    test('tx exists validates key length', () {
+      final tx = db.begin();
+      expect(() => tx.exists(Uint8List(63)), throwsA(isA<KeyTooLongError>()));
+      tx.rollback();
+    });
+
+    test('tx exists after db close throws', () {
+      final tx = db.begin();
+      db.close();
+      expect(() => tx.exists(_b('pre')), throwsStateError);
+    });
+  });
+
+  group('hardening: tx scanStrings', () {
+    late AssemblyDB db;
+    setUp(() {
+      db = AssemblyDB.open(_dbPath);
+      for (var i = 0; i < 10; i++) {
+        db.putString('txs:${i.toString().padLeft(2, '0')}', 'v$i');
+      }
+      db.sync();
+    });
+    tearDown(() => db.close());
+
+    test('tx scanStrings returns all entries', () {
+      final tx = db.begin();
+      final keys = <String>[];
+      tx.scanStrings(
+        start: 'txs:',
+        end: 'txs:\xff',
+        onEntry: (k, v) { keys.add(k); return true; },
+      );
+      expect(keys.length, greaterThanOrEqualTo(10));
+      tx.rollback();
+    });
+
+    test('tx count', () {
+      final tx = db.begin();
+      final c = tx.count(start: _b('txs:'), end: _b('txs:\xff'));
+      expect(c, greaterThanOrEqualTo(10));
+      tx.rollback();
+    });
+
+    test('tx scanStrings with early stop', () {
+      final tx = db.begin();
+      var seen = 0;
+      tx.scanStrings(
+        start: 'txs:',
+        end: 'txs:\xff',
+        onEntry: (_, __) { seen++; return seen < 3; },
+      );
+      expect(seen, 3);
+      tx.rollback();
+    });
+  });
+
+  group('hardening: scanAllStrings', () {
+    late AssemblyDB db;
+    setUp(() {
+      db = AssemblyDB.open(_dbPath);
+      for (var i = 0; i < 15; i++) {
+        db.putString('sas:${i.toString().padLeft(2, '0')}', 'val_$i');
+      }
+      db.sync();
+    });
+    tearDown(() => db.close());
+
+    test('scanAllStrings returns all entries', () {
+      final entries = db.scanAllStrings(start: 'sas:', end: 'sas:\xff');
+      expect(entries.length, 15);
+      for (final e in entries) {
+        expect(e.keyString, startsWith('sas:'));
+        expect(e.valueString, startsWith('val_'));
+      }
+    });
+
+    test('scanAllStrings empty range', () {
+      final entries = db.scanAllStrings(start: 'zzz:', end: 'zzz:\xff');
+      expect(entries, isEmpty);
+    });
+  });
+
+  // ============================================================
+  // PRODUCTION: real-world POS workflow
+  // ============================================================
+  group('production: POS table management', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('manage tables and assign orders', () {
+      for (var t = 1; t <= 10; t++) {
+        db.putString('table:$t:status', 'available');
+      }
+
+      db.transaction((tx) {
+        tx.putString('table:3:status', 'occupied');
+        tx.putString('table:3:order', '{"items":["burger","fries"]}');
+        tx.putString('table:3:time', '2026-03-13T14:30:00');
+      });
+
+      expect(db.getString('table:3:status'), 'occupied');
+      expect(db.getString('table:3:order'), contains('burger'));
+
+      var available = 0;
+      db.scanStrings(
+        start: 'table:',
+        end: 'table:\xff',
+        onEntry: (k, v) {
+          if (k.endsWith(':status') && v == 'available') available++;
+          return true;
+        },
+      );
+      expect(available, 9);
+
+      db.transaction((tx) {
+        tx.putString('table:3:status', 'available');
+        tx.deleteString('table:3:order');
+        tx.deleteString('table:3:time');
+      });
+      expect(db.getString('table:3:status'), 'available');
+      expect(db.getString('table:3:order'), isNull);
+    });
+  });
+
+  group('production: leaderboard', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('store and query scores', () {
+      final scores = {
+        'player:alice': '00950',
+        'player:bob': '01200',
+        'player:charlie': '00800',
+        'player:dave': '01500',
+        'player:eve': '01100',
+      };
+      db.batchPutStrings(scores);
+      db.sync();
+
+      final all = <String, int>{};
+      db.scanStrings(
+        start: 'player:',
+        end: 'player:\xff',
+        onEntry: (k, v) {
+          all[k.replaceFirst('player:', '')] = int.parse(v);
+          return true;
+        },
+      );
+      expect(all.length, 5);
+
+      final sorted = all.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+      expect(sorted.first.key, 'dave');
+      expect(sorted.last.key, 'charlie');
+    });
+  });
 }

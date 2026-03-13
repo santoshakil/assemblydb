@@ -178,14 +178,12 @@ class AssemblyDB {
   void batchPut(Map<Uint8List, Uint8List> entries) {
     _checkOpen();
     if (entries.isEmpty) return;
-    for (final e in entries.entries) {
-      _validateKV(e.key, e.value);
-    }
     using((arena) {
       final n = entries.length;
       final arr = arena<adb_batch_entry_t>(n);
       var i = 0;
       for (final e in entries.entries) {
+        _validateKV(e.key, e.value);
         final kp = allocNative(arena, e.key);
         final vp = allocNative(arena, e.value);
         arr[i]
@@ -268,6 +266,15 @@ class AssemblyDB {
       final err = _bindings.adb_drop_index(_db, np.cast());
       if (err != ADB_OK) throw AssemblyDBException.fromCode(err);
     });
+  }
+
+  List<ScanEntry> scanAllStrings({String? start, String? end}) {
+    final results = <ScanEntry>[];
+    scanStrings(start: start, end: end, onEntry: (k, v) {
+      results.add(ScanEntry(encodeUtf8(k), encodeUtf8(v)));
+      return true;
+    });
+    return results;
   }
 
   int countStrings({String? start, String? end}) => count(
