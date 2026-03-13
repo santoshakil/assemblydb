@@ -268,14 +268,10 @@ class AssemblyDB {
     });
   }
 
-  List<ScanEntry> scanAllStrings({String? start, String? end}) {
-    final results = <ScanEntry>[];
-    scanStrings(start: start, end: end, onEntry: (k, v) {
-      results.add(ScanEntry(encodeUtf8(k), encodeUtf8(v)));
-      return true;
-    });
-    return results;
-  }
+  List<ScanEntry> scanAllStrings({String? start, String? end}) => scanAll(
+    start: start != null ? encodeUtf8(start) : null,
+    end: end != null ? encodeUtf8(end) : null,
+  );
 
   int countStrings({String? start, String? end}) => count(
     start: start != null ? encodeUtf8(start) : null,
