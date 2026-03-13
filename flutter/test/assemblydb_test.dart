@@ -3475,4 +3475,219 @@ void main() {
       expect(sorted.last.key, 'charlie');
     });
   });
+
+  // ============================================================
+  // ADVERSARIAL: deeply nested exception types in scan
+  // ============================================================
+  group('adversarial: scan exception types', () {
+    late AssemblyDB db;
+    setUp(() {
+      db = AssemblyDB.open(_dbPath);
+      db.putString('se:1', 'v1');
+      db.sync();
+    });
+    tearDown(() => db.close());
+
+    test('FormatException in scan propagates', () {
+      expect(
+        () => db.scan(onEntry: (_, __) => throw const FormatException('bad')),
+        throwsFormatException,
+      );
+    });
+
+    test('RangeError in scan propagates', () {
+      expect(
+        () => db.scan(onEntry: (_, __) => throw RangeError('out')),
+        throwsRangeError,
+      );
+    });
+
+    test('String thrown in scan propagates', () {
+      Object? caught;
+      try {
+        db.scan(onEntry: (_, __) => throw 'string_error');
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught, 'string_error');
+    });
+
+    test('db usable after any scan exception type', () {
+      try { db.scan(onEntry: (_, __) => throw StateError('x')); } catch (_) {}
+      db.putString('se:2', 'v2');
+      expect(db.getString('se:2'), 'v2');
+    });
+  });
+
+  // ============================================================
+  // ADVERSARIAL: maxKeyLength and maxValueLength constants
+  // ============================================================
+  group('hardening: exported constants', () {
+    test('maxKeyLength is 62', () {
+      expect(maxKeyLength, 62);
+    });
+
+    test('maxValueLength is 254', () {
+      expect(maxValueLength, 254);
+    });
+
+    test('key at maxKeyLength works, maxKeyLength+1 throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.put(Uint8List(maxKeyLength), _b('v'));
+      expect(db.get(Uint8List(maxKeyLength)), isNotNull);
+      expect(
+        () => db.put(Uint8List(maxKeyLength + 1), _b('v')),
+        throwsA(isA<KeyTooLongError>()),
+      );
+      db.close();
+    });
+
+    test('value at maxValueLength works, maxValueLength+1 throws', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.put(_b('k'), Uint8List(maxValueLength));
+      expect(db.get(_b('k')), isNotNull);
+      expect(
+        () => db.put(_b('k'), Uint8List(maxValueLength + 1)),
+        throwsA(isA<ValTooLongError>()),
+      );
+      db.close();
+    });
+  });
+
+  // ============================================================
+  // STRESS: combined heavy workload
+  // ============================================================
+  group('stress: full lifecycle simulation', () {
+    test('3000 mixed operations with periodic sync', () {
+      final db = AssemblyDB.open(_dbPath);
+      final rng = Random(42);
+
+      for (var i = 0; i < 1000; i++) {
+        db.putString('fl:${i.toString().padLeft(4, '0')}', 'val_$i');
+      }
+      db.sync();
+
+      for (var i = 0; i < 500; i++) {
+        final key = 'fl:${rng.nextInt(1000).toString().padLeft(4, '0')}';
+        db.getString(key);
+      }
+
+      for (var i = 0; i < 500; i++) {
+        final key = 'fl:${rng.nextInt(1000).toString().padLeft(4, '0')}';
+        db.putString(key, 'updated_$i');
+        if (i % 100 == 0) db.sync();
+      }
+
+      for (var i = 0; i < 200; i++) {
+        final key = 'fl:${rng.nextInt(1000).toString().padLeft(4, '0')}';
+        db.deleteString(key);
+      }
+      db.sync();
+
+      for (var i = 0; i < 50; i++) {
+        db.transaction((tx) {
+          final key = 'fl:${(1000 + i).toString().padLeft(4, '0')}';
+          tx.putString(key, 'tx_$i');
+        });
+      }
+
+      final total = db.countStrings(start: 'fl:', end: 'fl:\xff');
+      expect(total, greaterThan(0));
+
+      final m = db.metrics;
+      expect(m.putsTotal, greaterThanOrEqualTo(1000));
+      expect(m.getsTotal, greaterThanOrEqualTo(500));
+
+      db.close();
+
+      final db2 = AssemblyDB.open(_dbPath);
+      final total2 = db2.countStrings(start: 'fl:', end: 'fl:\xff');
+      expect(total2, total);
+      db2.close();
+    });
+  });
+
+  // ============================================================
+  // ADVERSARIAL: reopen after destroy then recreate
+  // ============================================================
+  group('adversarial: destroy-recreate cycle', () {
+    test('destroy then reopen fresh', () {
+      final db = AssemblyDB.open(_dbPath);
+      db.putString('old', 'data');
+      db.sync();
+      db.close();
+
+      AssemblyDB.destroy(_dbPath);
+
+      final db2 = AssemblyDB.open(_dbPath);
+      expect(db2.getString('old'), isNull);
+      db2.putString('new', 'fresh');
+      expect(db2.getString('new'), 'fresh');
+      db2.close();
+    });
+  });
+
+  // ============================================================
+  // PRODUCTION: event log with timestamp keys
+  // ============================================================
+  group('production: event log', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('append events and query by time range', () {
+      for (var i = 0; i < 100; i++) {
+        final ts = (1710000000 + i * 60).toString();
+        db.putString('evt:$ts', '{"type":"click","id":$i}');
+      }
+      db.sync();
+
+      final startTs = (1710000000 + 30 * 60).toString();
+      final endTs = (1710000000 + 60 * 60).toString();
+      final range = <String>[];
+      db.scanStrings(
+        start: 'evt:$startTs',
+        end: 'evt:$endTs',
+        onEntry: (k, v) { range.add(v); return true; },
+      );
+      expect(range.length, greaterThanOrEqualTo(29));
+      expect(range.length, lessThanOrEqualTo(31));
+    });
+  });
+
+  // ============================================================
+  // ADVERSARIAL: transaction generic return type
+  // ============================================================
+  group('hardening: transaction return types', () {
+    late AssemblyDB db;
+    setUp(() => db = AssemblyDB.open(_dbPath));
+    tearDown(() => db.close());
+
+    test('transaction returns int', () {
+      db.putString('tr', '42');
+      final val = db.transaction((tx) => int.parse(tx.getString('tr')!));
+      expect(val, 42);
+    });
+
+    test('transaction returns bool', () {
+      db.putString('tr', 'yes');
+      final val = db.transaction((tx) => tx.getString('tr') == 'yes');
+      expect(val, true);
+    });
+
+    test('transaction returns list', () {
+      db.putString('a', '1');
+      db.putString('b', '2');
+      db.sync();
+      final vals = db.transaction((tx) {
+        return [tx.getString('a'), tx.getString('b')];
+      });
+      expect(vals, ['1', '2']);
+    });
+
+    test('transaction returns null', () {
+      final val = db.transaction((tx) => tx.getString('nonexistent'));
+      expect(val, isNull);
+    });
+  });
 }
